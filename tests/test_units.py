@@ -1,0 +1,213 @@
+"""Unit checks for each project module. No live Telegram or payment calls."""
+
+import os
+import tempfile
+import unittest
+from unittest.mock import patch
+
+os.environ["QUOTE_DB"] = tempfile.mktemp(suffix=".sqlite")
+os.environ.pop("SUPABASE_URL", None)
+os.environ.pop("SUPABASE_SERVICE_ROLE_KEY", None)
+
+from fastapi.testclient import TestClient
+
+import api.main as api_main
+from actions import attempt
+from api.billing import verify_signature
+from api.exports import build_pdf, build_xlsx, pdf_to_text
+from api.store import PLANS, consume, grant_plan, login, register
+from automate import _decide_action, _looks_like_new_quote, _merge_follow_up, _quote_keyboard, _reject_absurd
+from customs import customs_lane, format_notice, to_customs_record
+from duty import estimate_duty
+from market import financing_offer, quote_views
+from quote_agent import SAMPLE_QUOTE, parse_freight_quote
+from supabase_sync import sync_quote
+from workers import submit
+
+api_main._alert_telegram = lambda *args, **kwargs: None
+CLIENT = TestClient(api_main.app)
+BIZ = {"id": "demo", "legal_name": "Demo Global Logistics", "home_country": "Nigeria"}
+
+
+def priced(text: str) -> dict:
+    from market import enrich
+    with patch("market.fetch_market_rates", return_value={"source": "test", "usd_ngn": 1500, "usd_cny": 7.2, "cny_ngn": 200}):
+        return enrich(to_customs_record(parse_freight_quote(text), BIZ), BIZ)
+
+
+class CustomsTests(unittest.TestCase):
+    def test_lanes(self):
+        self.assertEqual(customs_lane("Nigeria", "Nigeria", "Nigeria"), "domestic")
+        self.assertEqual(customs_lane("Nigeria", "Nigeria", "United States"), "export")
+        self.assertEqual(customs_lane("Nigeria", "Thailand", "Nigeria"), "import")
+        self.assertEqual(customs_lane("Nigeria", "Thailand", "Germany"), "cross_trade")
+        self.assertEqual(customs_lane("Nigeria", None, "Nigeria"), "unknown")
+
+
+class DutyTests(unittest.TestCase):
+    def test_solar_estimate(self):
+        duty = estimate_duty("solar inverters", {"fx": {"cbn": {"NGN": 2_000_000}}, "commercial": {"currency": "NGN", "total_amount": 2_000_000}})
+        self.assertEqual(duty["hs_code"], "8504.40.00")
+        self.assertEqual(duty["import_duty_ngn"], 100_000)
+        self.assertEqual(duty["etls_ngn"], 10_000)
+        self.assertEqual(duty["ciss_ngn"], 20_000)
+        self.assertGreater(duty["vat_ngn"], 0)
+
+    def test_no_commodity(self):
+        self.assertIsNone(estimate_duty("general cargo", {"commercial": {"currency": "NGN", "total_amount": 10}}))
+
+
+class MarketTests(unittest.TestCase):
+    def test_naira_quote_is_not_reconverted(self):
+        views = quote_views(155_000, "NGN", {"cbn_usd_ngn": 5000, "parallel_usd_ngn": 6000}, {"usd_cny": 7.2})
+        self.assertEqual(views["cbn"]["NGN"], 155_000)
+        self.assertEqual(views["parallel"]["NGN"], 155_000)
+
+    def test_dollar_quote_converts(self):
+        views = quote_views(100, "USD", {"cbn_usd_ngn": 1500, "parallel_usd_ngn": 1600}, {"usd_cny": 7})
+        self.assertEqual(views["cbn"]["NGN"], 150_000)
+        self.assertEqual(views["parallel"]["NGN"], 160_000)
+
+    def test_finance_needs_duty(self):
+        offer = financing_offer(0, "NGN", {"cbn": {"usd_ngn": 1500}, "market": {}}, {})
+        self.assertFalse(offer["offered"])
+
+
+class ParserTests(unittest.TestCase):
+    def test_maersk_sample(self):
+        quote = parse_freight_quote(SAMPLE_QUOTE)
+        self.assertEqual(quote.quote_metadata.vendor_name, "Maersk Line")
+        self.assertEqual(quote.financials.currency, "USD")
+        self.assertEqual(quote.financials.total_amount, 3215)
+        self.assertEqual(quote.shipment_details.origin.port_code, "CNSHA")
+        self.assertEqual(quote.shipment_details.destination.port_code, "DEHAM")
+
+    def test_gig_naira_quote(self):
+        record = priced("Provider: GIG Logistics\nOrigin: Lagos\nDestination: Houston\nCharges:\n- Freight: NGN 150,000.00\n- Customs fee: NGN 5,000.00\nTotal Amount Due: NGN 155,000.00\n")
+        notice = format_notice(record)
+        self.assertEqual(record["commercial"]["vendor_name"], "GIG Logistics")
+        self.assertEqual(record["lane"], "export")
+        self.assertEqual(record["commercial"]["customs_and_tax"], 5000)
+        self.assertEqual(record["fx"]["cbn"]["NGN"], 155000)
+        self.assertNotIn("Demo Global", notice)
+
+    def test_mixed_currency_keeps_dollars(self):
+        record = priced("Provider: Line\nOrigin: Bangkok\nDestination: Apapa\nCharges:\n- Ocean Freight: USD 4,800.00\n- Customs: NGN 15,550,000\nTotal Amount Due: NGN 15,550,000\n")
+        self.assertIn("USD freight kept separate", " ".join(record["extraction_flags"]))
+        self.assertEqual(record["commercial"]["currency"], "NGN")
+
+
+class ActionTests(unittest.TestCase):
+    def test_pay_without_rail_queues_review(self):
+        result = attempt("pay", {"commercial": {"vendor_name": "GIG", "quote_reference_id": "Q1"}}, "1")
+        self.assertFalse(result["done"])
+        self.assertTrue(result["review_id"])
+
+    def test_clear_down_rail_queues_review(self):
+        with patch.dict(os.environ, {"CUSTOMS_CLEAR_URL": "http://127.0.0.1:9/clear"}):
+            result = attempt("clear", {"commercial": {"vendor_name": "GIG"}}, "1")
+        self.assertFalse(result["done"])
+        self.assertIn("down", result["note"])
+
+
+class AutomateTests(unittest.TestCase):
+    def test_follow_up_versus_new_quote(self):
+        self.assertFalse(_looks_like_new_quote("Apapa"))
+        self.assertTrue(_looks_like_new_quote("NGN 10,000 and USD 20"))
+        self.assertIn("Ikeja", _merge_follow_up("Origin Lagos", "Ikeja"))
+
+    def test_decisions(self):
+        ready = {"agent_ready": True}
+        self.assertEqual(_decide_action("hello", {"agent_ready": False}, None), "ask")
+        self.assertEqual(_decide_action("pay the trucker", ready, None), "pay")
+        self.assertEqual(_decide_action("clear the cargo", ready, None), "clear")
+        self.assertEqual(_decide_action("quote", ready, "hold"), "ask")
+        self.assertEqual(_decide_action("quote", ready, None), "publish")
+
+    def test_absurd_hold(self):
+        held = _reject_absurd({"commercial": {"currency": "USD", "total_amount": 200_000}, "fx": {}})
+        self.assertTrue(held)
+        fine = _reject_absurd({"commercial": {"currency": "NGN", "total_amount": 155_000}, "fx": {"cbn": {"NGN": 155_000}}})
+        self.assertIsNone(fine)
+
+    def test_keyboard(self):
+        labels = [button["text"] for row in _quote_keyboard("tg-1")["inline_keyboard"] for button in row]
+        self.assertIn("Download Client PDF", labels)
+        self.assertIn("Compare quotes", labels)
+
+
+class StoreTests(unittest.TestCase):
+    def test_register_login_and_plan_cap(self):
+        created = register("unit@example.com", "secret-pass", "Unit Co")
+        self.assertTrue(created["company_code"].startswith("co-"))
+        session = login("unit@example.com", "secret-pass")
+        self.assertTrue(session["token"])
+        user = consume(created["id"], 1)
+        self.assertEqual(user["quota_remaining"], 4)
+        granted = grant_plan("unit@example.com", "ref-unit-200", "quote-200")
+        self.assertEqual(granted["quota_remaining"], PLANS["quote-200"]["parses"])
+        again = grant_plan("unit@example.com", "ref-unit-200", "quote-200")
+        self.assertEqual(again["quota_remaining"], 200)
+
+
+class BillingTests(unittest.TestCase):
+    def test_signature(self):
+        os.environ["PAYSTACK_SECRET_KEY"] = "unit-secret"
+        import hashlib
+        import hmac
+        body = b'{"event":"charge.success"}'
+        good = hmac.new(b"unit-secret", body, hashlib.sha512).hexdigest()
+        self.assertTrue(verify_signature(body, good))
+        self.assertFalse(verify_signature(body, "nope"))
+
+
+class ExportTests(unittest.TestCase):
+    def test_xlsx_pdf_round_trip(self):
+        record = priced("Provider: Maersk\nPOL: Shanghai (CNSHA) -> POD: Hamburg (DEHAM)\nCharges:\n- Ocean Freight: USD 100\nTotal Amount Due: USD 100\n")
+        xlsx = build_xlsx([record], "Unit Co")
+        pdf = build_pdf([record], "Unit Co")
+        self.assertTrue(xlsx.startswith(b"PK"))
+        self.assertTrue(pdf.startswith(b"%PDF"))
+        self.assertIn("Ocean", pdf_to_text(pdf))
+
+
+class WorkerAndSyncTests(unittest.TestCase):
+    def test_worker_runs(self):
+        self.assertEqual(submit(lambda: 2 + 2).result(timeout=5), 4)
+
+    def test_sync_skips_without_supabase(self):
+        with patch.dict(os.environ, {"SUPABASE_URL": "", "SUPABASE_SERVICE_ROLE_KEY": ""}):
+            self.assertIsNone(sync_quote({"commercial": {}, "line_items": [], "split": {}}, "local"))
+
+
+class ApiTests(unittest.TestCase):
+    def test_health_and_webhook(self):
+        health = CLIENT.get("/health")
+        self.assertEqual(health.status_code, 200)
+        hook = CLIENT.post("/telegram/webhook", json={"update_id": 0})
+        self.assertEqual(hook.status_code, 200)
+
+    def test_auth_parse_and_terminal(self):
+        email = "api-unit@example.com"
+        reg = CLIENT.post("/v1/auth/register", json={"email": email, "password": "secret-pass", "business_name": "API Co"})
+        self.assertEqual(reg.status_code, 200, reg.text)
+        token = reg.json()["token"]
+        headers = {"Authorization": f"Bearer {token}"}
+        parsed = CLIENT.post("/v1/quotes/parse", headers=headers, json={"text": "Provider: GIG Logistics\nOrigin: Lagos\nDestination: Houston\nCharges:\n- Freight: NGN 150,000\nTotal Amount Due: NGN 150,000\n"})
+        self.assertEqual(parsed.status_code, 200, parsed.text)
+        self.assertEqual(parsed.json()["lane"], "export")
+        me = CLIENT.get("/v1/me", headers=headers)
+        self.assertEqual(me.json()["quota_remaining"], 4)
+        blocked = CLIENT.post("/v1/billing/checkout", headers=headers, json={"plan": "nope", "callback_url": "http://127.0.0.1:3000/billing"})
+        self.assertEqual(blocked.status_code, 400)
+        secret = os.environ.get("TERMINAL_WEBHOOK_SECRET")
+        term_headers = {"X-Terminal-Token": secret} if secret else {}
+        down = CLIENT.post("/v1/terminal/status", headers=term_headers, json={"feed_down": True, "gate_out": "unread", "source": "unit"})
+        self.assertEqual(down.status_code, 200, down.text)
+        self.assertTrue(down.json()["feed_down"])
+        listed = CLIENT.get("/v1/reviews", headers=headers)
+        self.assertTrue(any(row["kind"] == "terminal" for row in listed.json()["reviews"]))
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -345,12 +345,9 @@ def parse_freight_quote(raw_quote_text: str) -> QuoteExtractionResult:
             if amount is None:
                 flags.append(f"Could not parse amount for '{desc.strip()}'.")
                 continue
-            if re.search(r"\bUSD\b", desc, re.I) or (code and currency and code != currency):
-                flags.append(
-                    f"Kept {desc.strip()} as {code or 'a different currency'} {amount:,.2f}, outside the main total."
-                )
-                continue
-            currency = currency or code
+            if code and currency and code != currency:
+                flags.append(f"Kept {desc.strip()} as {code} {amount:,.2f} beside the {currency} lines.")
+            currency = "NGN" if code == "NGN" else (currency or code)
             category = _categorize(desc)
             if "customs" in desc.lower() and category == "Origin Charge":
                 flags.append(
@@ -385,9 +382,8 @@ def parse_freight_quote(raw_quote_text: str) -> QuoteExtractionResult:
                 flags.append(f"Skipped rollup '{desc}' so it is not added on top of the detail lines.")
                 continue
             if currency and code != currency:
-                flags.append(f"Kept {desc} as {code} {amount:,.2f}, outside the main total.")
-                continue
-            currency = currency or code
+                flags.append(f"Kept {desc} as {code} {amount:,.2f} beside the {currency} lines.")
+            currency = "NGN" if code == "NGN" else (currency or code)
             line_items.append(LineItem(description=desc, amount=amount, unit=None, category=_categorize(desc)))
         if line_items:
             flags.append("Read prices from lines that included NGN or USD amounts.")
@@ -450,7 +446,7 @@ def parse_freight_quote(raw_quote_text: str) -> QuoteExtractionResult:
     if not line_items:
         flags.append("No priced line items were found.")
 
-    return QuoteExtractionResult(
+    return _split_mixed_currency(QuoteExtractionResult(
         quote_metadata=VendorMetadata(
             vendor_name=vendor,
             quote_reference_id=ref_match.group(1) if ref_match else None,
@@ -477,7 +473,7 @@ def parse_freight_quote(raw_quote_text: str) -> QuoteExtractionResult:
             special_notes=notes,
         ),
         extraction_flags=flags,
-    )
+    ))
 
 
 def _clean_model_quote(quote: QuoteExtractionResult) -> QuoteExtractionResult:
@@ -545,7 +541,6 @@ def _split_mixed_currency(quote: QuoteExtractionResult) -> QuoteExtractionResult
     quote.financials.total_amount = round(sum(item.amount for item in ngn_items), 2)
     usd_total = round(sum(item.amount for item in usd_items), 2)
     quote.extraction_flags.append(f"USD freight kept separate: USD {usd_total:,.2f}.")
-    return quote
     return quote
 
 

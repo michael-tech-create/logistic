@@ -2,10 +2,29 @@
 
 **Creator: Michael Unogwu**
 
-A clearing desk for freight quotes. Paste a carrier quote, forward an email, send a voice note, or drop a PDF, and the desk turns it into one internal customs record: lane, charges, naira and yuan figures, a duty estimate, a demurrage buffer, and a payout split. The same record can go out by email, Telegram, PDF, or Excel.
+Global Customs Quote Desk is an AI-assisted logistics operations platform that converts messy freight quotes from Telegram, email, PDFs, images, and voice notes into normalized customs pricing records, with FX handling, duty estimation, risk controls, human review, exports, and subscription billing.
 
-This is a working record for the business. It is not a customs declaration filed with the Nigeria Customs Service, and it does not move money.
 
+diagram:
+Then immediately show:
+
+Telegram / Email / PDF / Voice
+              ↓
+       Quote Extraction
+       Gemini + Rules
+              ↓
+     Normalized Quote
+              ↓
+ ┌────────────┼────────────┐
+ FX          Duty        Risk
+ │            │            │
+ └────────────┼────────────┘
+              ↓
+        Human Review
+              ↓
+ Dashboard / Telegram / Email
+ PDF / Excel / Client Record
+ 
 ## The problem it solves
 
 A clearing agent receives quotes as messy text, screenshots, voice notes, and PDFs. The numbers sit in different currencies. Ocean freight is often in dollars while local charges are in naira. Turning that into a client-ready figure, then into a file the office can keep, takes the same manual pass on every job.
