@@ -1,0 +1,283 @@
+"""Quote desk layer: official FX, a user-set parallel rate, duty-finance estimate, demurrage buffer, and a payout split.
+
+Official USD/NGN and USD/CNY come from the open ExchangeRate-API mid-market feed.
+That feed is not the CBN customs assessment rate. A saved CBN rate overrides it.
+The parallel rate is whatever the business types in. Nothing here books a loan or sends money.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import urllib.request
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent
+RATE_CACHE = ROOT / "state" / "fx_rates.json"
+OPEN_FX = "https://open.er-api.com/v6/latest/USD"
+
+DEFAULTS = {
+    "cbn_usd_ngn": None,
+    "parallel_usd_ngn": None,
+    "finance_fee_rate": 0.02,
+    "demurrage_buffer_ngn": 350_000,
+    "demurrage_days": 7,
+    "fallback_official_usd_ngn": None,
+    "fallback_parallel_usd_ngn": None,
+    "split": {
+        "shipping_line": 0.70,
+        "trucker": 0.15,
+        "clearing_agent": 0.12,
+        "platform_fee": 0.03,
+    },
+}
+
+
+def _env_rate(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
+def load_fx_settings(business: dict | None = None) -> dict:
+    saved = {}
+    if RATE_CACHE.exists():
+        saved = json.loads(RATE_CACHE.read_text(encoding="utf-8"))
+    settings = {**DEFAULTS, **saved}
+    if not settings.get("fallback_official_usd_ngn"):
+        settings["fallback_official_usd_ngn"] = _env_rate("FX_FALLBACK_OFFICIAL_USD_NGN", 1550)
+    if not settings.get("fallback_parallel_usd_ngn"):
+        settings["fallback_parallel_usd_ngn"] = _env_rate("FX_FALLBACK_PARALLEL_USD_NGN", 1650)
+    if business:
+        for key in ("cbn_usd_ngn", "parallel_usd_ngn", "finance_fee_rate", "demurrage_buffer_ngn", "demurrage_days"):
+            if business.get(key) not in (None, ""):
+                settings[key] = business[key]
+    return settings
+
+
+def save_fx_settings(updates: dict) -> dict:
+    current = load_fx_settings()
+    for key in ("cbn_usd_ngn", "parallel_usd_ngn", "finance_fee_rate", "demurrage_buffer_ngn", "demurrage_days", "fallback_official_usd_ngn", "fallback_parallel_usd_ngn"):
+        if key in updates and updates[key] is not None:
+            current[key] = updates[key]
+    RATE_CACHE.parent.mkdir(parents=True, exist_ok=True)
+    RATE_CACHE.write_text(json.dumps(current, indent=2), encoding="utf-8")
+    return current
+
+
+def fetch_market_rates() -> dict:
+    request = urllib.request.Request(OPEN_FX, headers={"User-Agent": "logistics-quote-api/1.0"})
+    with urllib.request.urlopen(request, timeout=12) as response:
+        payload = json.loads(response.read().decode())
+    rates = payload.get("rates") or {}
+    usd_ngn = float(rates["NGN"])
+    cny_per_usd = float(rates["CNY"])
+    return {
+        "source": "open.er-api.com mid-market",
+        "as_of": payload.get("time_last_update_utc"),
+        "usd_ngn": round(usd_ngn, 4),
+        "usd_cny": round(cny_per_usd, 4),
+        "cny_ngn": round(usd_ngn / cny_per_usd, 4),
+    }
+
+
+def _money(amount: float, rate: float | None) -> float | None:
+    if rate is None:
+        return None
+    return round(amount * rate, 2)
+
+
+def quote_views(amount: float, currency: str, settings: dict, market: dict | None) -> dict:
+    """Express one quote total in USD, CNY, and NGN under two rate tiers."""
+    currency = (currency or "USD").upper()
+    market = market or {}
+    usd_ngn_market = market.get("usd_ngn")
+    usd_cny = market.get("usd_cny") or 7.2
+    cbn = settings.get("cbn_usd_ngn") or usd_ngn_market
+    parallel = settings.get("parallel_usd_ngn")
+
+    def to_usd(value: float) -> float:
+        if currency == "USD":
+            return value
+        if currency == "NGN" and cbn:
+            return value / cbn
+        if currency == "CNY":
+            return value / usd_cny
+        return value
+
+    usd = to_usd(amount)
+    def pack(ngn_per_usd: float | None) -> dict:
+        ngn = round(amount, 2) if currency == "NGN" else _money(usd, ngn_per_usd)
+        return {
+            "USD": round(usd, 2),
+            "CNY": round(usd * usd_cny, 2),
+            "NGN": ngn,
+            "usd_ngn": ngn_per_usd,
+        }
+
+    return {
+        "source_currency": currency,
+        "cbn": pack(cbn),
+        "parallel": pack(float(parallel) if parallel else None),
+        "market": market,
+        "note": "CBN column uses a saved customs rate when set, otherwise the mid-market feed. Parallel uses only the rate you enter.",
+    }
+
+
+def financing_offer(customs_amount: float, currency: str, views: dict, settings: dict) -> dict:
+    fee_rate = float(settings.get("finance_fee_rate") or 0.02)
+    code = currency.upper()
+    rate = views["cbn"].get("usd_ngn")
+    usd_cny = (views.get("market") or {}).get("usd_cny") or 7.2
+    principal = None
+    if customs_amount and code == "NGN":
+        principal = round(customs_amount, 2)
+    elif customs_amount and rate and code == "USD":
+        principal = round(customs_amount * rate, 2)
+    elif customs_amount and rate and code == "CNY":
+        principal = round(customs_amount / usd_cny * rate, 2)
+    if not principal:
+        return {
+            "offered": False,
+            "reason": "This quote has no customs or duty amount to finance.",
+            "fee_rate": fee_rate,
+        }
+    fee = round(principal * fee_rate, 2)
+    return {
+        "offered": True,
+        "principal_ngn": principal,
+        "fee_rate": fee_rate,
+        "origination_fee_ngn": fee,
+        "repayable_ngn": round(principal + fee, 2),
+        "status": "estimate",
+        "reason": "Estimate only. No lender has approved or disbursed a clearing loan.",
+    }
+
+
+def demurrage_guard(record: dict, settings: dict) -> dict:
+    destination = ((record.get("movement") or {}).get("destination") or {}).get("location_name") or ""
+    country = ((record.get("movement") or {}).get("destination") or {}).get("country") or ""
+    watched = any(name in f"{destination} {country}".lower() for name in ("lagos", "apapa", "tin can", "tincan", "nigeria"))
+    from api.store import PORT_BUFFERS, port_risk_level
+
+    level = port_risk_level()
+    buffer_ngn = float(settings.get("demurrage_buffer_ngn") or PORT_BUFFERS.get(level, 350_000))
+    applies = watched or record.get("lane") == "import"
+    return {
+        "applies": applies,
+        "port_watch": watched,
+        "level": level,
+        "free_days": int(settings.get("demurrage_days") or 7),
+        "buffer_ngn": buffer_ngn if applies else 0,
+        "reason": (
+            f"Port risk on the desk is {level}. Buffer NGN {buffer_ngn:,.0f} if clearing passes the free days. "
+            "This level is set by your desk, not a live Apapa feed."
+            if applies
+            else "No Lagos import signal on this quote, so the demurrage buffer is 0."
+        ),
+    }
+
+
+def split_plan(record: dict, views: dict, financing: dict, demurrage: dict, settings: dict) -> dict:
+    weights = settings.get("split") or DEFAULTS["split"]
+    usd = views["cbn"]["USD"] or 0
+    rate = views["cbn"]["usd_ngn"] or 0
+    ngn_total = views["cbn"]["NGN"] or 0
+    rows = []
+    for name, weight in weights.items():
+        rows.append({
+            "party": name,
+            "share": weight,
+            "usd": round(usd * weight, 2),
+            "ngn": round(ngn_total * weight, 2) if ngn_total else None,
+            "currency_preference": "USD" if name == "shipping_line" else "NGN",
+            "pays_when": {
+                "shipping_line": "When the freight invoice is accepted",
+                "trucker": "After delivery is confirmed",
+                "clearing_agent": "After the gate pass is recorded",
+                "platform_fee": "When the all-in quote is paid",
+            }.get(name, "On payment"),
+        })
+    return {
+        "rows": rows,
+        "customs_duty_ngn": financing.get("principal_ngn") or 0,
+        "demurrage_buffer_ngn": demurrage.get("buffer_ngn") or 0,
+        "platform_fee_rate": weights.get("platform_fee"),
+        "fx_spread_note": "A parallel-versus-official gap is shown for cash planning. The desk does not exchange currency.",
+        "execution": "Calculated routing only. No transfer is sent to customs, a trucker, or a bank.",
+        "usd_ngn_used": rate,
+    }
+
+
+def enrich(record: dict, business: dict | None = None) -> dict:
+    settings = load_fx_settings(business)
+    market = None
+    try:
+        market = fetch_market_rates()
+    except Exception as exc:  # noqa: BLE001 — quote still returns if the rate host is down
+        record.setdefault("extraction_flags", []).append(f"FX feed unavailable: {exc}")
+        official_fallback = float(settings.get("fallback_official_usd_ngn") or 1550)
+        market = {"source": "configured fallback", "usd_ngn": official_fallback, "usd_cny": 7.2, "cny_ngn": round(official_fallback / 7.2, 4)}
+        record.setdefault("extraction_flags", []).append(
+            f"Official NGN used fallback {official_fallback:,.0f} because the rate feed failed. This is not a CBN customs print."
+        )
+    commercial = record["commercial"]
+    movement = record.get("movement") or {}
+    named = bool(commercial.get("vendor_name") or commercial.get("quote_reference_id"))
+    placed = bool((movement.get("origin") or {}).get("location_name") or (movement.get("destination") or {}).get("location_name"))
+    priced = bool(record.get("line_items")) and float(commercial.get("total_amount") or 0) > 0
+    record["agent_ready"] = priced and (named or placed)
+    if not record["agent_ready"]:
+        record.setdefault("extraction_flags", []).append(
+            "No priced charge was found, so financing and the payout split were withheld."
+            if not priced
+            else "No vendor or route was found, so financing and the payout split were withheld."
+        )
+        record["fx"] = None
+        record["financing"] = {"offered": False, "reason": "Withheld until the quote has a vendor or a route."}
+        record["demurrage"] = {"buffer_ngn": 0, "reason": "Withheld until the quote has a route."}
+        record["split"] = {"rows": [], "execution": "No split. The quote was not understood."}
+        record["agent"] = {"decided": [], "refused": "Did not price, finance, or split an unidentified quote."}
+        return record
+    if commercial.get("currency") != "NGN" and not settings.get("parallel_usd_ngn"):
+        parallel_fallback = float(settings.get("fallback_parallel_usd_ngn") or 1650)
+        settings = {**settings, "parallel_usd_ngn": parallel_fallback}
+        record.setdefault("extraction_flags", []).append(
+            f"Parallel cash used fallback {parallel_fallback:,.0f}. Save your own rate to replace it."
+        )
+    views = quote_views(commercial["total_amount"], commercial["currency"], settings, market)
+    freight_note = next((flag for flag in record.get("extraction_flags") or [] if flag.startswith("USD freight kept separate")), "")
+    freight_match = re.search(r"USD ([0-9,]+\.\d{2})", freight_note)
+    if freight_match:
+        usd_freight = float(freight_match.group(1).replace(",", ""))
+        local_ngn = float(commercial["total_amount"] or 0)
+        for tier in ("cbn", "parallel"):
+            rate = (views.get(tier) or {}).get("usd_ngn")
+            if not rate:
+                continue
+            views[tier]["USD"] = usd_freight
+            views[tier]["NGN"] = round(local_ngn + usd_freight * rate, 2)
+            views[tier]["CNY"] = round(usd_freight * ((market or {}).get("usd_cny") or 7.2), 2)
+        views["mixed"] = {"usd_freight": usd_freight, "local_ngn": local_ngn}
+    duty = commercial.get("customs_and_tax") or 0
+    financing = financing_offer(duty, commercial["currency"], views, settings)
+    guard = demurrage_guard(record, settings)
+    record["fx"] = views
+    record["financing"] = financing
+    record["demurrage"] = guard
+    record["split"] = split_plan(record, views, financing, guard, settings)
+    record["agent"] = {
+        "decided": [
+            "Priced the quote in USD, CNY, and NGN",
+            "Checked whether any duty amount can be financed",
+            "Added a demurrage planning buffer when the move looks like a Nigeria import",
+            "Split the all-in total across shipping line, trucker, clearing agent, and platform fee",
+        ],
+        "refused": "Did not book a loan, exchange cash, or pay customs.",
+    }
+    return record

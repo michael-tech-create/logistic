@@ -1,0 +1,19 @@
+{
+  "businesses": [
+    {
+      "id": "demo-global",
+      "legal_name": "Demo Global Logistics",
+      "home_country": "Nigeria",
+      "default_currency": "USD",
+      "default_incoterms": "FOB",
+      "telegram_chat_ids": [
+        "7134529679",
+        "7057788306"
+      ],
+      "inbound_emails": [
+        "mikeunogwu2@gmail.com"
+      ],
+      "notify_email": "mikeunogwu2@gmail.com"
+    }
+  ]
+}

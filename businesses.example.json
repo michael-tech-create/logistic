@@ -1,0 +1,14 @@
+{
+  "businesses": [
+    {
+      "id": "demo-global",
+      "legal_name": "Demo Global Logistics",
+      "home_country": "Nigeria",
+      "default_currency": "USD",
+      "default_incoterms": "FOB",
+      "telegram_chat_ids": [],
+      "inbound_emails": ["@example.com"],
+      "notify_email": null
+    }
+  ]
+}
