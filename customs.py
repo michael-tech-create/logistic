@@ -11,6 +11,7 @@ The lane is decided from the business home country:
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -80,7 +81,7 @@ def to_customs_record(result: QuoteExtractionResult, business: dict[str, Any]) -
     destination = result.shipment_details.destination.country
     lane = customs_lane(business.get("home_country"), origin, destination)
     currency = result.financials.currency or business.get("default_currency") or "USD"
-    return {
+    record = {
         "schema": "global-customs-quote/v1",
         "business": {
             "id": business["id"],
@@ -90,6 +91,7 @@ def to_customs_record(result: QuoteExtractionResult, business: dict[str, Any]) -
         "lane": lane,
         "commercial": {
             "vendor_name": result.quote_metadata.vendor_name,
+            "carrier_name": result.quote_metadata.vendor_name or "Issued by: Regional Freight Broker Platform (Spot Market Desk)",
             "quote_reference_id": result.quote_metadata.quote_reference_id,
             "quote_date": result.quote_metadata.quote_date,
             "valid_until": result.quote_metadata.valid_until,
@@ -119,14 +121,15 @@ def to_customs_record(result: QuoteExtractionResult, business: dict[str, Any]) -
             "It is not a filed customs declaration."
         ),
     }
+    from quote_agent import lock_domestic_incoterm
+
+    return lock_domestic_incoterm(record)
 
 
 def _missing_questions(record: dict) -> list[str]:
     commercial = record.get("commercial") or {}
     movement = record.get("movement") or {}
     questions = []
-    if not commercial.get("vendor_name"):
-        questions.append("Which carrier issued this quote?")
     if not (movement.get("destination") or {}).get("location_name"):
         questions.append("What is the destination port?")
     if not record.get("line_items"):
@@ -140,6 +143,99 @@ def _place_label(place: dict) -> str:
     if code and f"({code})" not in name:
         return f"{name} ({code})"
     return name
+
+
+def land_corridor(record: dict, source: str = "") -> bool:
+    """A domestic road move named as a truck, flatbed, or dry-box trailer."""
+    blob = " ".join([
+        source,
+        record.get("lane") or "",
+        json.dumps(record.get("movement") or {}),
+        " ".join(item.get("description") or "" for item in record.get("line_items") or []),
+        " ".join(record.get("extraction_flags") or []),
+    ]).lower()
+    land = any(word in blob for word in ("dry box trailer", "flatbed", "truck", "land asset named"))
+    domestic = record.get("lane") == "domestic" or ("lagos" in blob and ("makurdi" in blob or "benue" in blob))
+    return land and domestic
+
+
+def fold_road_split(record: dict) -> None:
+    """Give shipping-line and clearing-agent shares to the trucker on a road corridor."""
+    split = record.get("split") or {}
+    rows = list(split.get("rows") or [])
+    if not rows:
+        return
+    trucker = next((row for row in rows if row.get("party") == "trucker"), None)
+    if trucker is None:
+        trucker = {"party": "trucker", "share": 0, "usd": 0, "ngn": 0, "role": "fleet_owner", "currency_preference": "NGN"}
+        rows.append(trucker)
+    kept = []
+    for row in rows:
+        if row.get("party") in {"shipping_line", "clearing_agent"}:
+            trucker["share"] = round(float(trucker.get("share") or 0) + float(row.get("share") or 0), 4)
+            for key in ("usd", "ngn"):
+                if row.get(key) is not None:
+                    trucker[key] = round(float(trucker.get(key) or 0) + float(row.get(key) or 0), 2)
+            continue
+        kept.append(row)
+    trucker["role"] = "fleet_owner"
+    split["rows"] = kept
+    record["split"] = split
+
+
+def volatile_official_line(record: dict) -> str | None:
+    """Wipe foreign money when any displayed naira-per-dollar rate is 2,500 or higher."""
+    fx = record.get("fx") or {}
+    rates = []
+    for tier in ("cbn", "parallel"):
+        rate = (fx.get(tier) or {}).get("usd_ngn")
+        if rate is not None:
+            rates.append(float(rate))
+    market_rate = ((fx.get("market") or {}).get("usd_ngn"))
+    if market_rate is not None:
+        rates.append(float(market_rate))
+    if not any(rate >= 2500 for rate in rates):
+        return None
+    commercial = record.get("commercial") or {}
+    if (commercial.get("currency") or "").upper() == "NGN":
+        total = float(commercial.get("total_amount") or 0)
+    else:
+        total = float(((fx.get("mixed") or {}).get("local_ngn")) or 0)
+    return (
+        f"Official Figures: NGN {total:,.0f} "
+        "(FX conversion omitted due to volatile exchange rate calculation anomaly)."
+    )
+
+
+def finalize_client_text(text: str, record: dict, source: str = "") -> str:
+    """Client letters must not repeat a bad rate, a shipping line, or an open carrier question."""
+    cleaned = text or ""
+    cleaned = re.sub(r"Which carrier issued this quote\??", "Carrier/Issuer: Freight Desk (Spot Market Platform)", cleaned, flags=re.I)
+    if land_corridor(record, source):
+        fold_road_split(record)
+        cleaned = re.sub(r"shipping[\s-]*line", "trucker/fleet owner", cleaned, flags=re.I)
+        cleaned = re.sub(r"clearing[\s-]*agent", "trucker/fleet owner", cleaned, flags=re.I)
+        if "Carrier/Issuer: Freight Desk (Spot Market Platform)" not in cleaned:
+            cleaned = "Carrier/Issuer: Freight Desk (Spot Market Platform)\n" + cleaned
+    official = volatile_official_line(record)
+    if official:
+        cleaned = re.sub(
+            r"(?:USD|CNY|usd_ngn|NGN/USD|exchange rate)[^\n]*",
+            "",
+            cleaned,
+            flags=re.I,
+        )
+        cleaned = re.sub(r"\b\d{1,3}(?:,\d{3})+(?:\.\d+)?\b|\b\d{4,}(?:\.\d+)?\b", _drop_corrupt_rate, cleaned)
+        if official not in cleaned:
+            cleaned = official + "\n" + cleaned
+    return re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+
+
+def _drop_corrupt_rate(match: re.Match[str]) -> str:
+    number = float(match.group(0).replace(",", ""))
+    if number >= 2500 and number < 10000:
+        return ""
+    return match.group(0)
 
 
 def format_notice(record: dict[str, Any]) -> str:
@@ -159,8 +255,10 @@ def format_notice(record: dict[str, Any]) -> str:
             if any("429" in flag or "quota" in flag for flag in record.get("extraction_flags") or [])
             else []
         ))
+    carrier = commercial.get("carrier_name") or commercial.get("vendor_name") or "Issued by: Regional Freight Broker Platform (Spot Market Desk)"
     lines = [
         f"{commercial['vendor_name'] or 'Quote'} · {record['lane'].replace('_', ' ')}",
+        carrier if carrier.startswith("Issued by:") else f"Carrier: {carrier}",
         *([commercial['quote_reference_id']] if commercial.get('quote_reference_id') else []),
         (
             f"{_place_label(origin)} → {_place_label(destination)}"
@@ -178,11 +276,15 @@ def format_notice(record: dict[str, Any]) -> str:
     already_naira = commercial.get("currency") == "NGN" and not fx.get("mixed")
     if already_naira:
         lines.append("This quote is already in naira, so it was not run through an exchange rate.")
-    elif cbn.get("NGN"):
-        lines.append(f"Official/mid NGN {cbn['NGN']:,.0f} · CNY {cbn['CNY']:,.2f}")
-    if not already_naira and parallel.get("NGN"):
-        lines.append(f"Parallel cash NGN {parallel['NGN']:,.0f} at {parallel['usd_ngn']:,.2f}")
-    elif not already_naira:
+        if fx.get("error"):
+            lines.append(fx["error"])
+    elif fx.get("error"):
+        lines.append(fx["error"])
+    elif cbn.get("NGN") and not cbn.get("anomaly"):
+        lines.append(f"Official figures NGN {cbn['NGN']:,.0f} · CNY {cbn['CNY']:,.2f}")
+    if not already_naira and not fx.get("error") and parallel.get("NGN") and not parallel.get("anomaly"):
+        lines.append(f"Parallel cash rate NGN {parallel['NGN']:,.0f} at {parallel['usd_ngn']:,.2f}")
+    elif not already_naira and not fx.get("error") and not parallel.get("anomaly"):
         lines.append("Parallel rate not set. Add one on the desk.")
     financing = record.get("financing") or {}
     if financing.get("offered"):
@@ -190,7 +292,9 @@ def format_notice(record: dict[str, Any]) -> str:
             f"Duty finance estimate NGN {financing['principal_ngn']:,.0f} plus {financing['fee_rate']:.1%} fee"
         )
     guard = record.get("demurrage") or {}
-    if guard.get("buffer_ngn"):
+    if guard.get("buffer_hours"):
+        lines.append(f"Demurrage buffer {guard['buffer_hours']:g} hours")
+    elif guard.get("buffer_ngn"):
         lines.append(f"Demurrage buffer NGN {guard['buffer_ngn']:,.0f} after {guard['free_days']} days")
     fee = ((record.get("split") or {}).get("platform_fee_rate"))
     if fee:
@@ -206,4 +310,4 @@ def format_notice(record: dict[str, Any]) -> str:
         lines.append(f"HS {duty['hs_code']} recognised. {duty.get('reason') or ''}".strip())
     if record.get("extraction_flags"):
         lines.append(f"Flags: {len(record['extraction_flags'])}")
-    return "\n".join(lines)
+    return finalize_client_text("\n".join(lines), record)

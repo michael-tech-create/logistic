@@ -48,6 +48,7 @@ export default function HomePage() {
   const [fallbackParallel, setFallbackParallel] = useState("1650");
   const [company, setCompany] = useState(null);
   const [deskNote, setDeskNote] = useState("");
+  const [reviews, setReviews] = useState([]);
 
   useEffect(() => {
     const saved = window.localStorage.getItem("quote_token");
@@ -180,6 +181,26 @@ export default function HomePage() {
     setDeskNote(payload.note || payload.detail || payload.level || (response.ok ? "Saved" : "Request failed"));
   }
 
+  async function loadReviews() {
+    const response = await fetch(`${API}/v1/reviews`, { headers: { Authorization: `Bearer ${token}` } });
+    const payload = await response.json();
+    const rows = payload.reviews || [];
+    setReviews(rows);
+    const pending = rows.filter((row) => row.status === "pending");
+    setDeskNote(pending.length ? pending.map((row) => `#${row.id} ${row.kind}: ${row.summary}`).join(" · ") : "No human reviews are waiting.");
+  }
+
+  async function decideReview(id, status) {
+    const response = await fetch(`${API}/v1/reviews/${id}`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ status }),
+    });
+    const payload = await response.json();
+    setDeskNote(payload.execution?.note || payload.execution_note || payload.detail || payload.status || "Review updated");
+    await loadReviews();
+  }
+
   async function removeQuote(recordId) {
     setError("");
     const response = await fetch(`${API}/v1/inbox/${recordId}`, {
@@ -280,7 +301,7 @@ export default function HomePage() {
               <Paper sx={{ p: 2 }}>
                 <Typography variant="h6">Company tools</Typography>
                 <Typography variant="body2">Telegram link code: {company.link_command}</Typography>
-                <Typography variant="body2" sx={{ mb: 1 }}>Port risk is {company.port_risk}. Financing, escrow, and payouts are saved on the desk ledger. No bank transfer is sent.</Typography>
+                <Typography variant="body2" sx={{ mb: 1 }}>Port risk is {company.port_risk}. Pay and clear wait for a person. Approve sends the stored quote to the payout or customs rail. If that rail is not configured, nothing is marked paid or cleared.</Typography>
                 <Stack direction={{ xs: "column", sm: "row" }} spacing={1} sx={{ mb: 1 }}>
                   <TextField size="small" label="Fallback official USD/NGN" value={fallbackOfficial} onChange={(e) => setFallbackOfficial(e.target.value)} />
                   <TextField size="small" label="Fallback parallel USD/NGN" value={fallbackParallel} onChange={(e) => setFallbackParallel(e.target.value)} />
@@ -294,9 +315,16 @@ export default function HomePage() {
                   <Button size="small" variant="outlined" onClick={() => postDesk("/v1/escrow", { record_id: shown[0]?.record_id || "manual", amount_ngn: shown[0]?.commercial?.total_amount || 0, action: "hold" })}>Hold on escrow ledger</Button>
                   <Button size="small" variant="outlined" onClick={() => postDesk("/v1/escrow", { record_id: shown[0]?.record_id || "manual", amount_ngn: shown[0]?.commercial?.total_amount || 0, action: "release" })}>Release ledger</Button>
                   <Button size="small" variant="outlined" onClick={() => postDesk("/v1/payouts", { record_id: shown[0]?.record_id || "manual", trucker_account: "trucker", agent_account: "agent", customs_account: "customs" })}>Save payout plan</Button>
-                  <Button size="small" variant="outlined" onClick={async () => { const response = await fetch(`${API}/v1/reviews`, { headers: { Authorization: `Bearer ${token}` } }); const payload = await response.json(); const pending = (payload.reviews || []).filter((row) => row.status === "pending"); setDeskNote(pending.length ? pending.map((row) => `#${row.id} ${row.kind}: ${row.summary}`).join(" · ") : "No human reviews are waiting."); }}>Human reviews</Button>
+                  <Button size="small" variant="outlined" onClick={loadReviews}>Human reviews</Button>
                 </Stack>
                 {deskNote ? <Typography variant="body2" sx={{ mt: 1 }}>{deskNote}</Typography> : null}
+                {reviews.filter((row) => row.status === "pending" && (row.kind === "pay" || row.kind === "clear")).map((row) => (
+                  <Stack key={row.id} direction="row" spacing={1} sx={{ mt: 1 }} alignItems="center">
+                    <Typography variant="body2">#{row.id} {row.kind}: {row.summary}</Typography>
+                    <Button size="small" variant="contained" onClick={() => decideReview(row.id, "approved")}>Approve</Button>
+                    <Button size="small" onClick={() => decideReview(row.id, "rejected")}>Reject</Button>
+                  </Stack>
+                ))}
               </Paper>
             ) : null}
             <Grid container spacing={2}>
@@ -346,10 +374,16 @@ export default function HomePage() {
                     <Grid key={tier} size={{ xs: 12, md: 6 }}>
                       <Card variant="outlined">
                         <CardContent>
-                          <Typography variant="overline">{tier === "cbn" ? "Official / mid-market" : "Parallel rate you entered"}</Typography>
-                          <Typography>USD {shown[0].fx[tier].USD?.toLocaleString() ?? "—"}</Typography>
-                          <Typography>CNY {shown[0].fx[tier].CNY?.toLocaleString() ?? "—"}</Typography>
-                          <Typography>NGN {shown[0].fx[tier].NGN?.toLocaleString() ?? "Set a parallel rate"}</Typography>
+                          <Typography variant="overline">{tier === "cbn" ? "Official figures" : "Parallel cash rate"}</Typography>
+                          {shown[0].fx[tier]?.anomaly ? (
+                            <Typography>FX calculation anomaly. This rate was withheld.</Typography>
+                          ) : (
+                            <>
+                              <Typography>USD {shown[0].fx[tier].USD?.toLocaleString() ?? "—"}</Typography>
+                              <Typography>CNY {shown[0].fx[tier].CNY?.toLocaleString() ?? "—"}</Typography>
+                              <Typography>NGN {shown[0].fx[tier].NGN?.toLocaleString() ?? "Set a parallel rate"}</Typography>
+                            </>
+                          )}
                         </CardContent>
                       </Card>
                     </Grid>
@@ -365,7 +399,7 @@ export default function HomePage() {
                     ? `Duty finance estimate NGN ${shown[0].financing.principal_ngn?.toLocaleString()} plus fee NGN ${shown[0].financing.origination_fee_ngn?.toLocaleString()}. ${shown[0].financing.reason}`
                     : shown[0].financing?.reason}
                 </Typography>
-                <Typography variant="body2">{shown[0].demurrage?.reason} Buffer NGN {Number(shown[0].demurrage?.buffer_ngn || 0).toLocaleString()}.</Typography>
+                <Typography variant="body2">{shown[0].demurrage?.reason}{shown[0].demurrage?.buffer_hours ? "" : ` Buffer NGN ${Number(shown[0].demurrage?.buffer_ngn || 0).toLocaleString()}.`}</Typography>
                 <Typography variant="body2">{shown[0].split?.execution}</Typography>
               </Paper>
             ) : null}

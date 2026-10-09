@@ -449,6 +449,19 @@ def reviews(authorization: str | None = Header(default=None), x_api_key: str | N
 @app.post("/v1/reviews/{review_id}")
 def review_decision(review_id: int, body: ReviewBody, authorization: str | None = Header(default=None), x_api_key: str | None = Header(default=None)):
     current_user(authorization, x_api_key)
+    if body.status not in {"approved", "rejected"}:
+        raise HTTPException(400, "Status must be approved or rejected.")
+    from actions import execute_approved
+    from api.store import get_review
+
+    current = get_review(review_id)
+    if current is None:
+        raise HTTPException(404, "Review not found.")
+    if body.status == "approved" and current.get("kind") in {"pay", "clear"}:
+        result = execute_approved(current)
+        status = "executed" if result["done"] else "pending"
+        row = resolve_review(review_id, status, result["note"])
+        return {**row, "execution": result}
     try:
         row = resolve_review(review_id, body.status)
     except ValueError as exc:

@@ -140,6 +140,21 @@ def _iso_date(month_name: str, day: str, year: str) -> str:
     return f"{int(year):04d}-{month:02d}-{int(day):02d}"
 
 
+def _optional_accessorial(description: str) -> bool:
+    return bool(re.search(r"\b(optional|tarp(?:ing|ed)?|conditional)\b", description, re.I))
+
+
+def _waiting_windows(text: str) -> dict:
+    def total(pattern: str) -> float:
+        return sum(float(match) for match in re.findall(pattern, text, re.I))
+
+    return {
+        "loading_hours": total(r"(\d+(?:\.\d+)?)\s*hours?\s+free\s+for\s+loading"),
+        "offloading_hours": total(r"(\d+(?:\.\d+)?)\s*hours?\s+free\s+for\s+offloading"),
+        "warehouse_days": total(r"(\d+(?:\.\d+)?)\s*free\s+days?\s+at\s+warehouse"),
+    }
+
+
 def _categorize(description: str) -> Category:
     text = description.lower()
     if any(k in text for k in ("baf", "lss", "bunker", "fuel", "peak season", "pss")):
@@ -349,6 +364,9 @@ def parse_freight_quote(raw_quote_text: str) -> QuoteExtractionResult:
                 flags.append(f"Kept {desc.strip()} as {code} {amount:,.2f} beside the {currency} lines.")
             currency = "NGN" if code == "NGN" else (currency or code)
             category = _categorize(desc)
+            if _optional_accessorial(desc):
+                flags.append(f"Left optional charge '{desc.strip()}' out of the all-in total.")
+                continue
             if "customs" in desc.lower() and category == "Origin Charge":
                 flags.append(
                     f"{desc.strip()} categorized as Origin Charge (export clearance); "
@@ -373,6 +391,9 @@ def parse_freight_quote(raw_quote_text: str) -> QuoteExtractionResult:
                 code = "USD" if re.search(r"USD|\$|dollar", suffix.group(2), re.I) else "NGN"
                 desc = cleaned[: suffix.start()].strip(" :-")
             else:
+                continue
+            if _optional_accessorial(desc):
+                flags.append(f"Left optional charge '{desc}' out of the all-in total.")
                 continue
             if len(desc) < 3 or re.search(
                 r"\b(subtotal|grand total|total local|total amount due|customs/tax|official/mid|parallel|platform fee|duty finance)\b",
@@ -413,10 +434,22 @@ def parse_freight_quote(raw_quote_text: str) -> QuoteExtractionResult:
                 f"Printed total {stated_total:,.2f} includes subtotals. Working total is the detail-line sum {item_sum:,.2f}."
             )
             stated_total = item_sum
+        elif any(flag.startswith("Left optional charge") for flag in flags):
+            flags.append(
+                f"Printed total {stated_total:,.2f} includes an optional charge. Working total is the confirmed sum {item_sum:,.2f}."
+            )
+            stated_total = item_sum
         else:
             flags.append(
                 f"Stated total {stated_total:.2f} does not match line-item sum {item_sum:.2f}."
             )
+    if re.search(r"dry box trailer|flatbed|\btruck\b", text, re.I):
+        flags.append("Land asset named on the quote.")
+    windows = _waiting_windows(text)
+    if any(windows.values()):
+        flags.append(
+            "Local waiting window: loading {loading_hours:g}h, offloading {offloading_hours:g}h, warehouse {warehouse_days:g}d".format(**windows)
+        )
     else:
         flags.append(
             f"Line-item sum {item_sum:.2f} matches the stated total of {currency or ''} {stated_total:.2f}.".strip()
@@ -506,7 +539,14 @@ def _annotate_place(place: Location) -> None:
     low = name.lower()
     if place.country:
         return
-    if any(word in low for word in ("nigeria", "lagos", "apapa", "tin can")):
+    inland = (
+        "nigeria", "lagos", "apapa", "tin can", "makurdi", "benue", "abuja", "kano", "ibadan",
+        "enugu", "kaduna", "portharcourt", "port harcourt", "onitsha", "owerri", "jos", "ilorin",
+        "aba", "warri", "benin", "calabar", "maiduguri", "sokoto", "yola", "minna", "lafia",
+        "awka", "asaba", "uyo", "bauchi", "gombe", "jalingo", "damaturu", "katsina", "birnin kebbi",
+        "lokoja", "osogbo", "ado ekiti", "akure", "abakaliki", "umuahia", "yenagoa",
+    )
+    if any(word in low for word in inland):
         place.country = "Nigeria"
     elif any(word in low for word in ("houston", "united states", "usa", "u.s.")):
         place.country = "United States"
@@ -798,6 +838,25 @@ def _gemini_text(api_key: str, prompt: str, model: str) -> str:
     return text
 
 
+DOMESTIC_INCOTERM = "N/A (Domestic Carriage)"
+
+
+def lock_domestic_incoterm(record: dict) -> dict:
+    """A domestic lane has no international trade term and must not ask for one."""
+    if record.get("lane") == "domestic":
+        commercial = record.setdefault("commercial", {})
+        commercial["incoterms"] = DOMESTIC_INCOTERM
+    return record
+
+
+def _volatile_rate(fx: dict) -> bool:
+    for tier in ("cbn", "parallel", "market"):
+        rate = (fx.get(tier) or {}).get("usd_ngn") if isinstance(fx.get(tier), dict) else None
+        if rate is not None and float(rate) >= 2500:
+            return True
+    return False
+
+
 def compose_client_reply(client_text: str, record: dict, decision: str, held: str | None = None) -> str:
     """Write the email and chat reply from the figures already on the record."""
     from customs import _missing_questions, format_notice
@@ -820,8 +879,8 @@ def compose_client_reply(client_text: str, record: dict, decision: str, held: st
         "customs_and_tax": commercial.get("customs_and_tax"),
         "incoterms": commercial.get("incoterms"),
         "mixed": fx.get("mixed"),
-        "official": fx.get("cbn"),
-        "parallel": fx.get("parallel"),
+        "official": None if _volatile_rate(fx) else fx.get("cbn"),
+        "parallel": None if _volatile_rate(fx) else fx.get("parallel"),
         "financing": record.get("financing"),
         "demurrage": record.get("demurrage"),
         "split": [
@@ -832,27 +891,9 @@ def compose_client_reply(client_text: str, record: dict, decision: str, held: st
         "disclaimer": record.get("disclaimer"),
         "refused": (record.get("agent") or {}).get("refused"),
     }
-    fallback = format_notice(record)
-    keys = _gemini_keys()
-    if not keys:
-        return fallback
-    models = []
-    for name in (os.environ.get("GEMINI_MODEL"), "gemini-flash-lite-latest", "gemini-flash-latest"):
-        if name and name not in models:
-            models.append(name)
-    prompt = "FACTS:\n" + json.dumps(facts, default=str)
-    start = _next_key_index(len(keys))
-    for offset in range(len(keys)):
-        slot = (start + offset) % len(keys)
-        for model in models:
-            try:
-                text = _gemini_text(keys[slot], prompt, model)
-                return text[:3500] if len(text) >= 40 else fallback
-            except Exception as exc:  # noqa: BLE001 — a client still gets the structured notice
-                message = str(exc)
-                if any(token in message for token in ("API_KEY_INVALID", "API key not valid", "permission")):
-                    break
-    return fallback
+    # The model may explain, but it must not invent the money. The letter is the settled notice.
+    del facts
+    return format_notice(record)
 
 
 def _repair_route(raw_quote_text: str, quote: QuoteExtractionResult) -> QuoteExtractionResult:

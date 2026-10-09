@@ -258,7 +258,10 @@ def _handle_callback(callback: dict) -> None:
         questions = _missing_questions(record)
         commercial = record.get("commercial") or {}
         movement = record.get("movement") or {}
-        if not commercial.get("incoterms"):
+        from quote_agent import lock_domestic_incoterm
+
+        lock_domestic_incoterm(record)
+        if record.get("lane") != "domestic" and not commercial.get("incoterms"):
             questions.append("What incoterm applies, such as CIF or FOB?")
         if not movement.get("package"):
             questions.append("What container or package type is this?")

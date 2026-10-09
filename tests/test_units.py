@@ -12,14 +12,15 @@ os.environ.pop("SUPABASE_SERVICE_ROLE_KEY", None)
 from fastapi.testclient import TestClient
 
 import api.main as api_main
-from actions import attempt
+from actions import attempt, execute_approved
+from api.store import get_review
 from api.billing import verify_signature
 from api.exports import build_pdf, build_xlsx, pdf_to_text
 from api.store import PLANS, consume, grant_plan, login, register
 from automate import _decide_action, _looks_like_new_quote, _merge_follow_up, _quote_keyboard, _reject_absurd
 from customs import customs_lane, format_notice, to_customs_record
 from duty import estimate_duty
-from market import financing_offer, quote_views
+from market import financing_offer, quote_views, validate_displayed_fx
 from quote_agent import SAMPLE_QUOTE, parse_freight_quote
 from supabase_sync import sync_quote
 from workers import submit
@@ -68,6 +69,75 @@ class MarketTests(unittest.TestCase):
         self.assertEqual(views["cbn"]["NGN"], 150_000)
         self.assertEqual(views["parallel"]["NGN"], 160_000)
 
+    def test_inland_haulage_pays_the_trucker(self):
+        record = priced(
+            "Provider: Fleet\nOrigin: Lagos\nDestination: Makurdi, Benue State\n"
+            "Charges:\n- Haulage: NGN 800,000\nTotal Amount Due: NGN 800,000\n"
+        )
+        self.assertEqual(record["lane"], "domestic")
+        self.assertEqual(record["commercial"]["incoterms"], "N/A (Domestic Carriage)")
+        shares = {row["party"]: row["share"] for row in record["split"]["rows"]}
+        self.assertNotIn("shipping_line", shares)
+        self.assertEqual(shares["trucker"], 0.80)
+        self.assertEqual(shares["platform_fee"], 0.10)
+        self.assertEqual(shares["security_and_permits"], 0.10)
+        self.assertNotIn("clearing_agent", shares)
+        self.assertGreaterEqual(shares["trucker"], 0.75)
+
+    def test_fx_ratio_outside_band_uses_live_or_withholds(self):
+        views = quote_views(100, "USD", {"cbn_usd_ngn": 5000, "parallel_usd_ngn": 6000}, {"usd_ngn": 1500, "usd_cny": 7.2})
+        self.assertEqual(views["cbn"]["usd_ngn"], 1500)
+        self.assertIsNone(views["parallel"]["usd_ngn"])
+        checked = validate_displayed_fx(views, {"usd_ngn": 1500, "usd_cny": 7.2}, "USD")
+        self.assertEqual(checked["cbn"]["NGN"], 150_000)
+        self.assertNotIn("error", checked)
+        blocked = quote_views(100, "USD", {"cbn_usd_ngn": 5000, "parallel_usd_ngn": 6000}, {})
+        blocked = validate_displayed_fx(blocked, {}, "USD")
+        self.assertEqual(blocked["error"], "Official FX Rate: [Market Rates Pending Verification]")
+        self.assertIsNone(blocked["cbn"]["NGN"])
+
+    def test_optional_tarping_stays_out_of_the_total(self):
+        record = priced(
+            "Provider: Fleet\nOrigin: Lagos\nDestination: Makurdi\n"
+            "Charges:\n- Haulage: NGN 800,000\n- Optional tarping: NGN 40,000\n"
+            "Total Amount Due: NGN 840,000\n"
+            "4 hours free for loading. 2 hours free for offloading. 1 free day at warehouse.\n"
+        )
+        self.assertEqual(record["commercial"]["total_amount"], 800_000)
+        self.assertEqual(record["demurrage"]["buffer_hours"], 30)
+        self.assertNotIn("0.", record["demurrage"]["reason"][:1])
+
+    def test_trucking_email_drops_ocean_parties_and_bad_rates(self):
+        record = priced(
+            "Provider: Fleet\nOrigin: Lagos\nDestination: Makurdi, Benue State\n"
+            "Equipment: 30-Ton Dry Box Trailer\n"
+            "Charges:\n- Haulage: NGN 800,000\nTotal Amount Due: NGN 800,000\n"
+        )
+        record["fx"]["cbn"]["usd_ngn"] = 5000
+        record["split"]["rows"] = [
+            {"party": "shipping_line", "share": 0.70, "ngn": 560000, "usd": 0},
+            {"party": "clearing_agent", "share": 0.10, "ngn": 80000, "usd": 0},
+            {"party": "trucker", "share": 0.20, "ngn": 160000, "usd": 0},
+        ]
+        notice = format_notice(record)
+        self.assertNotIn("shipping line", notice.lower())
+        self.assertNotIn("clearing agent", notice.lower())
+        self.assertNotIn("Which carrier", notice)
+        self.assertIn("Carrier/Issuer: Freight Desk (Spot Market Platform)", notice)
+        self.assertIn("Official Figures: NGN 800,000", notice)
+        self.assertNotIn("5000", notice)
+        shares = {row["party"]: row["share"] for row in record["split"]["rows"]}
+        self.assertNotIn("shipping_line", shares)
+        self.assertNotIn("clearing_agent", shares)
+        self.assertEqual(shares["trucker"], 1.0)
+
+    def test_missing_carrier_is_the_broker_desk(self):
+        record = priced("Origin: Lagos\nDestination: Houston\nCharges:\n- Freight: NGN 150,000\nTotal Amount Due: NGN 150,000\n")
+        self.assertEqual(record["commercial"]["carrier_name"], "Issued by: Regional Freight Broker Platform (Spot Market Desk)")
+        notice = format_notice(record)
+        self.assertIn("Regional Freight Broker Platform", notice)
+        self.assertNotIn("Which carrier", notice)
+
     def test_finance_needs_duty(self):
         offer = financing_offer(0, "NGN", {"cbn": {"usd_ngn": 1500}, "market": {}}, {})
         self.assertFalse(offer["offered"])
@@ -103,11 +173,28 @@ class ActionTests(unittest.TestCase):
         self.assertFalse(result["done"])
         self.assertTrue(result["review_id"])
 
-    def test_clear_down_rail_queues_review(self):
+    def test_clear_down_rail_stays_pending(self):
+        queued = attempt("clear", {"commercial": {"vendor_name": "GIG"}}, "1")
         with patch.dict(os.environ, {"CUSTOMS_CLEAR_URL": "http://127.0.0.1:9/clear"}):
-            result = attempt("clear", {"commercial": {"vendor_name": "GIG"}}, "1")
+            result = execute_approved(get_review(queued["review_id"]))
         self.assertFalse(result["done"])
-        self.assertIn("down", result["note"])
+        self.assertIn("refused", result["note"])
+
+    def test_approved_pay_calls_rail(self):
+        queued = attempt("pay", {"commercial": {"vendor_name": "GIG", "quote_reference_id": "Q9"}}, "1")
+        class Fake:
+            status = 200
+            def read(self):
+                return b'{"ok": true, "note": "paid"}'
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                return False
+        with patch.dict(os.environ, {"PAYOUT_URL": "http://bank.test/pay"}):
+            with patch("actions.urllib.request.urlopen", return_value=Fake()):
+                result = execute_approved(get_review(queued["review_id"]))
+        self.assertTrue(result["done"])
+        self.assertEqual(result["note"], "paid")
 
 
 class AutomateTests(unittest.TestCase):

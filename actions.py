@@ -29,15 +29,33 @@ def _post(url: str, payload: dict) -> dict:
 
 
 def attempt(kind: str, record: dict, chat_id: str | None) -> dict:
+    """Queue a person. Money and cargo release wait for that approval, then the rail."""
     commercial = record.get("commercial") or {}
     summary = f"{kind} {commercial.get('quote_reference_id') or ''} {commercial.get('vendor_name') or ''}".strip()
+    review = queue_human_review(kind, summary, chat_id, "Waiting for a person to approve.", record)
+    return {
+        "done": False,
+        "review_id": review["id"],
+        "note": "A person has to approve this on the desk before any money is sent or cargo is cleared.",
+    }
+
+
+def execute_approved(row: dict) -> dict:
+    """Call the payout or customs rail only after a person approved this review."""
+    import json
+
+    kind = row.get("kind")
+    if kind not in {"pay", "clear"}:
+        return {"done": True, "note": "Approved. This review does not send money or clear cargo."}
     url = os.environ.get("PAYOUT_URL") if kind == "pay" else os.environ.get("CUSTOMS_CLEAR_URL")
     if not url:
-        review = queue_human_review(kind, summary, chat_id, "The rail is not configured.")
-        return {"done": False, "review_id": review["id"], "note": "No rail is configured, so this is waiting for a person."}
+        return {"done": False, "note": "Approved by a person, but no rail is configured, so nothing was sent."}
+    raw = row.get("payload")
+    if not raw:
+        return {"done": False, "note": "Approved by a person, but the quote was not stored, so nothing was sent."}
+    record = json.loads(raw)
     try:
-        result = _post(url, {"kind": kind, "chat_id": chat_id, "record": record})
-    except Exception as exc:  # noqa: BLE001 — a down rail must become a review, not a fake payment
-        review = queue_human_review(kind, summary, chat_id, str(exc)[:300])
-        return {"done": False, "review_id": review["id"], "note": "The rail is down, so this is waiting for a person."}
-    return {"done": True, "review_id": None, "note": result.get("note") or f"{kind} was accepted by the rail.", "rail": result}
+        result = _post(url, {"kind": kind, "chat_id": row.get("chat_id"), "record": record})
+    except Exception as exc:  # noqa: BLE001 — approval must not become a fake payment
+        return {"done": False, "note": f"The rail refused the request: {exc}"[:300]}
+    return {"done": True, "note": result.get("note") or f"{kind} was accepted by the rail.", "rail": result}

@@ -98,8 +98,13 @@ def quote_views(amount: float, currency: str, settings: dict, market: dict | Non
     market = market or {}
     usd_ngn_market = market.get("usd_ngn")
     usd_cny = market.get("usd_cny") or 7.2
-    cbn = settings.get("cbn_usd_ngn") or usd_ngn_market
+    saved_cbn = settings.get("cbn_usd_ngn")
+    cbn = saved_cbn if not _rate_out_of_band(saved_cbn) and saved_cbn else usd_ngn_market
+    if _rate_out_of_band(cbn):
+        cbn = None
     parallel = settings.get("parallel_usd_ngn")
+    if _rate_out_of_band(parallel):
+        parallel = None
 
     def to_usd(value: float) -> float:
         if currency == "USD":
@@ -127,6 +132,51 @@ def quote_views(amount: float, currency: str, settings: dict, market: dict | Non
         "market": market,
         "note": "CBN column uses a saved customs rate when set, otherwise the mid-market feed. Parallel uses only the rate you enter.",
     }
+
+
+FX_PENDING = "Official FX Rate: [Market Rates Pending Verification]"
+
+
+def _rate_out_of_band(rate: float | None) -> bool:
+    return rate is not None and (float(rate) < 1000 or float(rate) > 2000)
+
+
+def validate_displayed_fx(views: dict, market: dict | None, currency: str) -> dict:
+    """Reject an official or parallel pair whose naira divided by dollars is outside 1,000–2,000."""
+    market = market or {}
+    mixed = bool(views.get("mixed"))
+    violated = False
+    for tier in ("cbn", "parallel"):
+        block = dict(views.get(tier) or {})
+        usd = block.get("USD")
+        ngn = block.get("NGN")
+        used = block.get("usd_ngn")
+        implied = (ngn / usd) if usd and ngn and not mixed else None
+        if not _rate_out_of_band(implied) and not _rate_out_of_band(used):
+            if implied is not None:
+                block["calculated_usd_ngn"] = round(implied, 4)
+                views[tier] = block
+            continue
+        violated = True
+        if (currency or "").upper() == "NGN":
+            block["USD"] = block["CNY"] = block["usd_ngn"] = None
+        else:
+            block["NGN"] = block["CNY"] = block["usd_ngn"] = None
+            if (currency or "").upper() != "USD":
+                block["USD"] = None
+        block["anomaly"] = True
+        views[tier] = block
+    official = dict(views.get("cbn") or {})
+    if (currency or "").upper() != "NGN" and not official.get("usd_ngn"):
+        official["NGN"] = official["CNY"] = official["usd_ngn"] = None
+        official["anomaly"] = True
+        views["cbn"] = official
+        violated = True
+    if violated:
+        views["fx_anomaly"] = True
+        views["error"] = FX_PENDING
+        views["note"] = FX_PENDING
+    return views
 
 
 def financing_offer(customs_amount: float, currency: str, views: dict, settings: dict) -> dict:
@@ -159,6 +209,20 @@ def financing_offer(customs_amount: float, currency: str, views: dict, settings:
     }
 
 
+def _waiting_from_flags(record: dict) -> dict:
+    loading = offloading = warehouse = 0.0
+    for flag in record.get("extraction_flags") or []:
+        match = re.search(
+            r"Local waiting window: loading ([0-9.]+)h, offloading ([0-9.]+)h, warehouse ([0-9.]+)d",
+            flag,
+        )
+        if match:
+            loading += float(match.group(1))
+            offloading += float(match.group(2))
+            warehouse += float(match.group(3))
+    return {"loading_hours": loading, "offloading_hours": offloading, "warehouse_days": warehouse}
+
+
 def demurrage_guard(record: dict, settings: dict) -> dict:
     destination = ((record.get("movement") or {}).get("destination") or {}).get("location_name") or ""
     country = ((record.get("movement") or {}).get("destination") or {}).get("country") or ""
@@ -167,24 +231,53 @@ def demurrage_guard(record: dict, settings: dict) -> dict:
 
     level = port_risk_level()
     buffer_ngn = float(settings.get("demurrage_buffer_ngn") or PORT_BUFFERS.get(level, 350_000))
-    applies = watched or record.get("lane") == "import"
+    ocean = watched or record.get("lane") == "import"
+    windows = _waiting_from_flags(record)
+    has_window = any(windows.values())
+    window_hours = windows["loading_hours"] + windows["offloading_hours"] + windows["warehouse_days"] * 24
+    if has_window:
+        return {
+            "applies": True,
+            "port_watch": watched,
+            "level": level,
+            "free_days": windows["warehouse_days"] or int(settings.get("demurrage_days") or 7),
+            "loading_hours": windows["loading_hours"],
+            "offloading_hours": windows["offloading_hours"],
+            "warehouse_days": windows["warehouse_days"],
+            "buffer_hours": window_hours,
+            "buffer_ngn": buffer_ngn if ocean else 0,
+            "reason": (
+                f"Demurrage buffer {window_hours:g} hours "
+                f"({windows['loading_hours']:g} hours free for loading, "
+                f"{windows['offloading_hours']:g} hours free for offloading, "
+                f"{windows['warehouse_days']:g} free days at warehouse)."
+            ),
+        }
     return {
-        "applies": applies,
+        "applies": ocean,
         "port_watch": watched,
         "level": level,
         "free_days": int(settings.get("demurrage_days") or 7),
-        "buffer_ngn": buffer_ngn if applies else 0,
+        "buffer_ngn": buffer_ngn if ocean else 0,
         "reason": (
             f"Port risk on the desk is {level}. Buffer NGN {buffer_ngn:,.0f} if clearing passes the free days. "
             "This level is set by your desk, not a live Apapa feed."
-            if applies
-            else "No Lagos import signal on this quote, so the demurrage buffer is 0."
+            if ocean
+            else "No local waiting window was written on this quote, so the demurrage buffer is 0."
         ),
     }
 
 
+INLAND_SPLIT = {
+    "trucker": 0.80,
+    "platform_fee": 0.10,
+    "security_and_permits": 0.10,
+}
+
+
 def split_plan(record: dict, views: dict, financing: dict, demurrage: dict, settings: dict) -> dict:
-    weights = settings.get("split") or DEFAULTS["split"]
+    inland = record.get("lane") == "domestic"
+    weights = INLAND_SPLIT if inland else (settings.get("split") or DEFAULTS["split"])
     usd = views["cbn"]["USD"] or 0
     rate = views["cbn"]["usd_ngn"] or 0
     ngn_total = views["cbn"]["NGN"] or 0
@@ -195,11 +288,13 @@ def split_plan(record: dict, views: dict, financing: dict, demurrage: dict, sett
             "share": weight,
             "usd": round(usd * weight, 2),
             "ngn": round(ngn_total * weight, 2) if ngn_total else None,
-            "currency_preference": "USD" if name == "shipping_line" else "NGN",
+            "currency_preference": "NGN" if inland or name != "shipping_line" else "USD",
+            "role": "fleet_owner" if inland and name == "trucker" else name,
             "pays_when": {
                 "shipping_line": "When the freight invoice is accepted",
-                "trucker": "After delivery is confirmed",
-                "clearing_agent": "After the gate pass is recorded",
+                "trucker": "After delivery is confirmed. Covers diesel, vehicle overhead, and the driver.",
+                "clearing_agent": "After the gate pass or transit permit is recorded",
+                "security_and_permits": "When transit security and permits are confirmed",
                 "platform_fee": "When the all-in quote is paid",
             }.get(name, "On payment"),
         })
@@ -264,10 +359,15 @@ def enrich(record: dict, business: dict | None = None) -> dict:
             views[tier]["NGN"] = round(local_ngn + usd_freight * rate, 2)
             views[tier]["CNY"] = round(usd_freight * ((market or {}).get("usd_cny") or 7.2), 2)
         views["mixed"] = {"usd_freight": usd_freight, "local_ngn": local_ngn}
+    views = validate_displayed_fx(views, market, commercial.get("currency") or "")
     duty = commercial.get("customs_and_tax") or 0
     financing = financing_offer(duty, commercial["currency"], views, settings)
     guard = demurrage_guard(record, settings)
     record["fx"] = views
+    from customs import fold_road_split, land_corridor
+
+    if land_corridor(record):
+        fold_road_split(record)
     record["financing"] = financing
     record["demurrage"] = guard
     record["split"] = split_plan(record, views, financing, guard, settings)

@@ -321,8 +321,7 @@ def ensure_company(user: dict) -> dict:
     return dict(conn.execute("SELECT * FROM companies WHERE user_id = ?", (user["id"],)).fetchone())
 
 
-def queue_human_review(kind: str, summary: str, chat_id: str | None = None, detail: str = "") -> dict:
-    conn = connect()
+def _ensure_reviews(conn) -> None:
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS human_reviews (
@@ -332,13 +331,27 @@ def queue_human_review(kind: str, summary: str, chat_id: str | None = None, deta
             detail TEXT,
             chat_id TEXT,
             status TEXT NOT NULL DEFAULT 'pending',
-            created_at INTEGER NOT NULL
+            created_at INTEGER NOT NULL,
+            payload TEXT,
+            execution_note TEXT
         )
         """
     )
+    for column, kind in (("payload", "TEXT"), ("execution_note", "TEXT")):
+        try:
+            conn.execute(f"ALTER TABLE human_reviews ADD COLUMN {column} {kind}")
+        except Exception:
+            pass
+
+
+def queue_human_review(kind: str, summary: str, chat_id: str | None = None, detail: str = "", payload: dict | None = None) -> dict:
+    import json
+
+    conn = connect()
+    _ensure_reviews(conn)
     cur = conn.execute(
-        "INSERT INTO human_reviews (kind, summary, detail, chat_id, status, created_at) VALUES (?, ?, ?, ?, 'pending', ?)",
-        (kind, summary, detail, chat_id, int(time.time())),
+        "INSERT INTO human_reviews (kind, summary, detail, chat_id, status, created_at, payload) VALUES (?, ?, ?, ?, 'pending', ?, ?)",
+        (kind, summary, detail, chat_id, int(time.time()), json.dumps(payload) if payload else None),
     )
     conn.commit()
     return {"id": cur.lastrowid, "kind": kind, "status": "pending", "summary": summary}
@@ -346,28 +359,27 @@ def queue_human_review(kind: str, summary: str, chat_id: str | None = None, deta
 
 def list_reviews() -> list[dict]:
     conn = connect()
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS human_reviews (
-            id INTEGER PRIMARY KEY,
-            kind TEXT NOT NULL,
-            summary TEXT NOT NULL,
-            detail TEXT,
-            chat_id TEXT,
-            status TEXT NOT NULL DEFAULT 'pending',
-            created_at INTEGER NOT NULL
-        )
-        """
-    )
+    _ensure_reviews(conn)
     rows = conn.execute("SELECT * FROM human_reviews ORDER BY id DESC LIMIT 30").fetchall()
     return [dict(row) for row in rows]
 
 
-def resolve_review(review_id: int, status: str) -> dict | None:
-    if status not in {"approved", "rejected"}:
-        raise ValueError("Status must be approved or rejected.")
+def get_review(review_id: int) -> dict | None:
     conn = connect()
-    conn.execute("UPDATE human_reviews SET status = ? WHERE id = ?", (status, review_id))
+    _ensure_reviews(conn)
+    row = conn.execute("SELECT * FROM human_reviews WHERE id = ?", (review_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def resolve_review(review_id: int, status: str, execution_note: str | None = None) -> dict | None:
+    if status not in {"approved", "rejected", "executed", "pending"}:
+        raise ValueError("Status must be approved, rejected, executed, or pending.")
+    conn = connect()
+    _ensure_reviews(conn)
+    conn.execute(
+        "UPDATE human_reviews SET status = ?, execution_note = ? WHERE id = ?",
+        (status, execution_note, review_id),
+    )
     conn.commit()
     row = conn.execute("SELECT * FROM human_reviews WHERE id = ?", (review_id,)).fetchone()
     return dict(row) if row else None
