@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import urllib.parse
 import urllib.request
 
 
@@ -22,7 +23,7 @@ def _request(method: str, path: str, payload) -> list | dict:
     base = (os.environ.get("SUPABASE_URL") or "").rstrip("/")
     headers = _headers()
     data = None
-    if method != "DELETE":
+    if payload is not None and method != "DELETE":
         data = json.dumps(payload).encode()
     else:
         headers.pop("Content-Type", None)
@@ -55,6 +56,7 @@ def sync_quote(record: dict, record_id: str, *, chat_id: str | None = None, tele
         "cny_amount": official.get("CNY"),
         "usd_ngn_rate": official.get("usd_ngn"),
         "usd_cny_rate": None,
+        "company_id": record.get("company_id") or (record.get("business") or {}).get("id"),
         "payload": record,
     }
     saved = _request("POST", "quotes?on_conflict=record_id", row)
@@ -91,3 +93,25 @@ def sync_quote(record: dict, record_id: str, *, chat_id: str | None = None, tele
     if splits:
         _request("POST", "quote_splits", splits)
     return quote_id
+
+
+def list_quotes(company_id: str) -> list[dict] | None:
+    """Quotes for one company. None means Supabase is not configured."""
+    if not (os.environ.get("SUPABASE_URL") and os.environ.get("SUPABASE_SERVICE_ROLE_KEY")):
+        return None
+    if not company_id:
+        return []
+    rows = _request(
+        "GET",
+        f"quotes?company_id=eq.{urllib.parse.quote(company_id)}&select=record_id,payload&order=created_at.desc&limit=20",
+        None,
+    )
+    records = []
+    for row in rows if isinstance(rows, list) else []:
+        payload = row.get("payload") or {}
+        if isinstance(payload, str):
+            payload = json.loads(payload)
+        payload["record_id"] = row.get("record_id")
+        payload["company_id"] = company_id
+        records.append(payload)
+    return records

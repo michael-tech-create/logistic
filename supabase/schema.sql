@@ -17,9 +17,13 @@ create table if not exists public.quotes (
     cny_amount numeric,
     usd_ngn_rate numeric,
     usd_cny_rate numeric,
+    company_id text,
     payload jsonb not null default '{}'::jsonb,
     created_at timestamptz not null default now()
 );
+
+alter table public.quotes add column if not exists company_id text;
+create index if not exists quotes_company_id_idx on public.quotes (company_id);
 
 create table if not exists public.line_items (
     id uuid primary key default gen_random_uuid(),

@@ -45,6 +45,8 @@ from api.store import (
     save_batch,
     save_payout_plan,
     set_port_risk,
+    company_parallel,
+    set_company_parallel,
     user_by_api_key,
     user_by_token,
 )
@@ -111,12 +113,16 @@ def current_user(authorization: str | None, x_api_key: str | None):
 
 
 def _business(user: dict) -> dict:
+    company = ensure_company(user)
     return {
-        "id": f"user-{user['id']}",
-        "legal_name": user["business_name"],
-        "home_country": user.get("home_country") or "Nigeria",
+        "id": company["code"],
+        "legal_name": company["legal_name"],
+        "home_country": company.get("home_country") or user.get("home_country") or "Nigeria",
         "default_currency": "USD",
         "default_incoterms": None,
+        "notify_email": company.get("notify_email") or user.get("email"),
+        "parallel_usd_ngn": company.get("custom_parallel_ngn"),
+        "port_risk_level": company.get("port_risk_level") or "normal",
     }
 
 
@@ -186,28 +192,44 @@ class PayoutBody(BaseModel):
 
 @app.get("/v1/rates")
 def rates(authorization: str | None = Header(default=None), x_api_key: str | None = Header(default=None)):
-    current_user(authorization, x_api_key)
-    return load_fx_settings()
+    user = current_user(authorization, x_api_key)
+    settings = load_fx_settings()
+    parallel = company_parallel(ensure_company(user)["code"])
+    if parallel is not None:
+        settings["parallel_usd_ngn"] = parallel
+    return settings
 
 
 @app.post("/v1/rates")
 def set_rates(body: RateBody, authorization: str | None = Header(default=None), x_api_key: str | None = Header(default=None)):
-    current_user(authorization, x_api_key)
-    return save_fx_settings(body.model_dump(exclude_none=True))
+    user = current_user(authorization, x_api_key)
+    updates = body.model_dump(exclude_none=True)
+    if "parallel_usd_ngn" in updates:
+        set_company_parallel(ensure_company(user)["code"], updates.pop("parallel_usd_ngn"))
+    saved = save_fx_settings(updates) if updates else load_fx_settings()
+    parallel = company_parallel(ensure_company(user)["code"])
+    if parallel is not None:
+        saved["parallel_usd_ngn"] = parallel
+    return saved
 
 
 @app.get("/v1/company")
 def company(authorization: str | None = Header(default=None), x_api_key: str | None = Header(default=None)):
     user = current_user(authorization, x_api_key)
     row = ensure_company(user)
-    return {"code": row["code"], "legal_name": row["legal_name"], "port_risk": port_risk_level(), "link_command": f"/link {row['code']}"}
+    return {
+        "code": row["code"],
+        "legal_name": row["legal_name"],
+        "port_risk": port_risk_level(row["code"]),
+        "link_command": f"/link {row['code']}",
+    }
 
 
 @app.post("/v1/port-risk")
 def update_port_risk(body: PortRiskBody, authorization: str | None = Header(default=None), x_api_key: str | None = Header(default=None)):
-    current_user(authorization, x_api_key)
+    user = current_user(authorization, x_api_key)
     try:
-        return set_port_risk(body.level)
+        return set_port_risk(body.level, ensure_company(user)["code"])
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
 
@@ -251,28 +273,46 @@ def email_channel(authorization: str | None = Header(default=None), x_api_key: s
     return {"ok": True, "detail": "Gmail inbox login succeeded."}
 
 
+def _company_id(record: dict) -> str | None:
+    return record.get("company_id") or (record.get("business") or {}).get("id")
+
+
 @app.get("/v1/inbox")
 def inbox(authorization: str | None = Header(default=None), x_api_key: str | None = Header(default=None)):
-    """Quotes that Telegram or email already parsed, newest first."""
-    current_user(authorization, x_api_key)
+    """Quotes for the signed-in company only, newest first."""
+    user = current_user(authorization, x_api_key)
+    company_id = ensure_company(user)["code"]
+    from supabase_sync import list_quotes
+
+    remote = list_quotes(company_id)
+    if remote is not None:
+        return {"records": remote}
     folder = ROOT / "state" / "records"
     records = []
     if folder.exists():
-        files = sorted(folder.glob("*.json"), key=lambda path: path.stat().st_mtime, reverse=True)[:20]
+        files = sorted(folder.glob("*.json"), key=lambda path: path.stat().st_mtime, reverse=True)
         for path in files:
             record = json.loads(path.read_text(encoding="utf-8"))
+            if _company_id(record) != company_id:
+                continue
             record["record_id"] = path.stem
             records.append(record)
+            if len(records) >= 20:
+                break
     return {"records": records}
 
 
 @app.delete("/v1/inbox/{record_id}")
 def delete_inbox_record(record_id: str, authorization: str | None = Header(default=None), x_api_key: str | None = Header(default=None)):
-    current_user(authorization, x_api_key)
+    user = current_user(authorization, x_api_key)
+    company_id = ensure_company(user)["code"]
     if not re.fullmatch(r"[A-Za-z0-9_-]+", record_id):
         raise HTTPException(400, "Unknown quote id.")
     path = ROOT / "state" / "records" / f"{record_id}.json"
     if not path.is_file():
+        raise HTTPException(404, "Quote not found.")
+    record = json.loads(path.read_text(encoding="utf-8"))
+    if _company_id(record) != company_id:
         raise HTTPException(404, "Quote not found.")
     path.unlink()
     return {"deleted": record_id}

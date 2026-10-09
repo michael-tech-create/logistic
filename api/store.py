@@ -137,6 +137,14 @@ def connect() -> sqlite3.Connection:
     cols = [row[1] for row in conn.execute("PRAGMA table_info(users)")]
     if "company_code" not in cols:
         conn.execute("ALTER TABLE users ADD COLUMN company_code TEXT")
+    company_cols = [row[1] for row in conn.execute("PRAGMA table_info(companies)")]
+    for column, kind in (
+        ("port_risk_level", "TEXT DEFAULT 'normal'"),
+        ("custom_parallel_ngn", "REAL"),
+        ("notify_email", "TEXT"),
+    ):
+        if column not in company_cols:
+            conn.execute(f"ALTER TABLE companies ADD COLUMN {column} {kind}")
     conn.commit()
     return conn
 
@@ -171,8 +179,8 @@ def register(email: str, password: str, business_name: str, home_country: str = 
     user_id = cur.lastrowid
     code = "co-" + secrets.token_hex(3)
     conn.execute(
-        "INSERT INTO companies (user_id, code, legal_name, home_country) VALUES (?, ?, ?, ?)",
-        (user_id, code, business_name.strip(), home_country),
+        "INSERT INTO companies (user_id, code, legal_name, home_country, notify_email) VALUES (?, ?, ?, ?, ?)",
+        (user_id, code, business_name.strip(), home_country, email.lower().strip()),
     )
     conn.execute("UPDATE users SET company_code = ? WHERE id = ?", (code, user_id))
     conn.commit()
@@ -413,6 +421,9 @@ def company_businesses() -> list[dict]:
             "home_country": row["home_country"],
             "telegram_chat_ids": json.loads(row["telegram_chat_ids"] or "[]"),
             "inbound_emails": json.loads(row["inbound_emails"] or "[]"),
+            "notify_email": row["notify_email"],
+            "port_risk_level": row["port_risk_level"] or "normal",
+            "parallel_usd_ngn": row["custom_parallel_ngn"],
             "default_currency": "USD",
             "default_incoterms": None,
         })
@@ -422,22 +433,60 @@ def company_businesses() -> list[dict]:
 PORT_BUFFERS = {"normal": 350_000, "elevated": 900_000, "severe": 1_800_000}
 
 
-def port_risk_level() -> str:
+def port_risk_level(company_code: str | None = None) -> str:
+    """Company override, then the global default of normal."""
     conn = connect()
+    if company_code:
+        row = conn.execute(
+            "SELECT port_risk_level FROM companies WHERE code = ?",
+            (company_code,),
+        ).fetchone()
+        if row and row["port_risk_level"]:
+            return row["port_risk_level"]
     row = conn.execute("SELECT level FROM port_risk WHERE id = 1").fetchone()
     return row["level"] if row else "normal"
 
 
-def set_port_risk(level: str) -> dict:
+def set_port_risk(level: str, company_code: str | None = None) -> dict:
     if level not in PORT_BUFFERS:
         raise ValueError("Level must be normal, elevated, or severe.")
     conn = connect()
+    if company_code:
+        updated = conn.execute(
+            "UPDATE companies SET port_risk_level = ? WHERE code = ?",
+            (level, company_code),
+        )
+        conn.commit()
+        if updated.rowcount:
+            return {"level": level, "buffer_ngn": PORT_BUFFERS[level], "company_id": company_code}
     conn.execute(
         "INSERT INTO port_risk (id, level, updated_at) VALUES (1, ?, ?) ON CONFLICT(id) DO UPDATE SET level = excluded.level, updated_at = excluded.updated_at",
         (level, int(time.time())),
     )
     conn.commit()
     return {"level": level, "buffer_ngn": PORT_BUFFERS[level]}
+
+
+def set_company_parallel(company_code: str, rate: float | None) -> None:
+    conn = connect()
+    conn.execute(
+        "UPDATE companies SET custom_parallel_ngn = ? WHERE code = ?",
+        (rate, company_code),
+    )
+    conn.commit()
+
+
+def company_parallel(company_code: str | None) -> float | None:
+    if not company_code:
+        return None
+    conn = connect()
+    row = conn.execute(
+        "SELECT custom_parallel_ngn FROM companies WHERE code = ?",
+        (company_code,),
+    ).fetchone()
+    if row is None or row["custom_parallel_ngn"] is None:
+        return None
+    return float(row["custom_parallel_ngn"])
 
 
 def apply_finance(user_id: int, record_id: str, principal_ngn: float, fee_rate: float = 0.02) -> dict:

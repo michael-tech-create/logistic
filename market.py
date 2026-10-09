@@ -229,7 +229,8 @@ def demurrage_guard(record: dict, settings: dict) -> dict:
     watched = any(name in f"{destination} {country}".lower() for name in ("lagos", "apapa", "tin can", "tincan", "nigeria"))
     from api.store import PORT_BUFFERS, port_risk_level
 
-    level = port_risk_level()
+    company_id = (record.get("business") or {}).get("id")
+    level = port_risk_level(company_id)
     buffer_ngn = float(settings.get("demurrage_buffer_ngn") or PORT_BUFFERS.get(level, 350_000))
     ocean = watched or record.get("lane") == "import"
     windows = _waiting_from_flags(record)

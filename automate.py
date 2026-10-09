@@ -383,7 +383,7 @@ def _act(chat_id: str, outcome: dict, decision: str, held: str | None, client_te
     if decision == "ask":
         follow = "" if held else " Reply with the missing piece and I will add it to this quote."
         return (held or "I still need a few details before I can email this quote.") + follow
-    return "I could not send the email. Check SMTP_HOST and the company notify address."
+    return ""
 
 
 def handle_telegram_message(message: dict) -> None:
@@ -587,6 +587,9 @@ def poll_email_once() -> int:
 
 
 def _store_record(record: dict, name: str, *, chat_id: str | None = None, telegram_user_id: str | None = None) -> None:
+    company_id = (record.get("business") or {}).get("id")
+    if company_id:
+        record["company_id"] = company_id
     folder = ROOT / "state" / "records"
     folder.mkdir(parents=True, exist_ok=True)
     (folder / f"{name}.json").write_text(json.dumps(record, indent=2), encoding="utf-8")
