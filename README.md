@@ -137,6 +137,32 @@ terminal-watch/      Go watcher for the live PTML schedule
 supabase/schema.sql  Quotes, line items, splits
 ```
 
+## Deploy
+
+The clearing desk is Next.js in `dashboard/`. The API and the Telegram/email loop are Python in this repo root. They share `state/` (billing SQLite, quote JSON, Telegram offset). Run them as one container so that folder is one disk. Two Render or Railway services each get a private disk, and the desk would not see quotes the worker saved.
+
+### Desk on Vercel
+
+1. Push this repo to GitHub.
+2. Import it in Vercel. Set the root directory to `dashboard/`.
+3. Set `API_PROXY_URL` to the public API origin, for example `https://quote-desk-api.onrender.com`. No trailing slash.
+4. Leave `NEXT_PUBLIC_API_URL` unset. The desk then calls `/v1/...` on its own host, and `dashboard/next.config.js` proxies that to `API_PROXY_URL`.
+5. Set `PAYSTACK_CALLBACK_URL` on the API to `https://<your-vercel-host>/billing`.
+
+The desk does not read Supabase. `NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_ANON_KEY` are not used.
+
+### API and intake on Render or Railway
+
+`Dockerfile` listens on `$PORT` and starts `python automate.py` beside uvicorn. `render.yaml` is a Render Blueprint: one web service, health check `GET /health`, and a 1 GB disk mounted at `state/`.
+
+Copy the same keys you use in `.env` into the host’s environment: Gemini, Telegram, IMAP, SMTP, Paystack, and Supabase if you sync quotes. Run `supabase/schema.sql` in the Supabase SQL editor before the first sync. Put `businesses.json` in the service if email routing depends on it, or bake a copy into the image before you build.
+
+On Railway, create one service from this repo root, leave the start command as the Dockerfile `CMD`, and add a volume mounted at `/app/state`.
+
+The web service must stay awake. A sleeping instance stops Telegram long-polling and unread-mail checks. Use a plan that does not spin the service down.
+
+To run the two processes on different hosts later, both need the same `state/` volume. Until then, keep the single container.
+
 ## Creator
 
 Michael Unogwu built this desk so a clearing business can take a quote from a chat, an inbox, or a file and answer with one priced record the client can read.

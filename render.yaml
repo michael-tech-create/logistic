@@ -1,0 +1,17 @@
+# One web service. The API and python automate.py share state/ on the disk
+# below. Two separate services would each get their own disk, so the desk
+# inbox would not see Telegram or email quotes.
+services:
+  - type: web
+    name: quote-desk-api
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
+    plan: starter
+    disk:
+      name: quote-state
+      mountPath: /app/state
+      sizeGB: 1
+    envVars:
+      - key: PYTHONUNBUFFERED
+        value: "1"

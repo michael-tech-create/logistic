@@ -1,0 +1,10 @@
+.venv
+.git
+.env
+**/node_modules
+**/__pycache__
+**/.next
+web/dist
+dashboard/.next
+state
+*.sqlite
