@@ -59,12 +59,16 @@ def ingest_text(
         telegram_chat_id=telegram_chat_id,
         email_from=email_from,
     )
+    unassigned = False
     if business is None:
-        raise LookupError(
-            "No business matched this chat or sender. "
-            "Add the chat id or email domain in businesses.json, "
-            "or start the message with business:<id>."
-        )
+        unassigned = True
+        business = {
+            "id": "unassigned",
+            "legal_name": "Unlinked chat",
+            "home_country": "Nigeria",
+            "default_currency": "USD",
+            "default_incoterms": None,
+        }
     quote = parse_quote_smart(text)
     record = to_customs_record(quote, business)
     from market import enrich
@@ -73,7 +77,10 @@ def ingest_text(
     from duty import estimate_duty
 
     record["duty_estimate"] = estimate_duty(text, record)
-    return {"notice": format_notice(record), "record": record, "business": business}
+    notice = format_notice(record)
+    if unassigned:
+        notice += "\n\nThis chat is not linked yet. On the desk, copy /link and your company code, and send that here so the quote is filed under your agency."
+    return {"notice": notice, "record": record, "business": business}
 
 
 def _split_business_prefix(text: str) -> tuple[str | None, str]:
@@ -438,10 +445,21 @@ def handle_telegram_message(message: dict) -> None:
         return
     _clear_dialog(chat_id)
     sender = message.get("from") or {}
-    _store_record(record, record_id, chat_id=chat_id, telegram_user_id=str(sender.get("id") or ""))
     _remember_compare(chat_id, record_id)
-    mailed = _act(chat_id, outcome, decision, held, quote_text)
-    send_telegram(chat_id, f"{mailed}\n\n{outcome['notice']}", _quote_keyboard(record_id))
+    send_telegram(chat_id, outcome["notice"], _quote_keyboard(record_id))
+    from workers import submit
+
+    submit(_finish_quote, chat_id, outcome, decision, held, quote_text, record, record_id, str(sender.get("id") or ""))
+
+
+def _finish_quote(chat_id, outcome, decision, held, quote_text, record, record_id, telegram_user_id) -> None:
+    """Save and email after Telegram already has the quote."""
+    try:
+        if record.get("company_id") != "unassigned" and (record.get("business") or {}).get("id") != "unassigned":
+            _store_record(record, record_id, chat_id=chat_id, telegram_user_id=telegram_user_id)
+        _act(chat_id, outcome, decision, held, quote_text)
+    except Exception as exc:  # noqa: BLE001 — the chat already has the quote
+        print(f"[intake] save skipped: {exc}")
 
 
 def poll_telegram_once() -> int:
@@ -502,9 +520,9 @@ def send_email(to_address: str, subject: str, body: str) -> bool:
     port = int(os.environ.get("SMTP_PORT", "587"))
     try:
         if port == 465:
-            smtp = smtplib.SMTP_SSL(host, port, timeout=30)
+            smtp = smtplib.SMTP_SSL(host, port, timeout=8)
         else:
-            smtp = smtplib.SMTP(host, port, timeout=30)
+            smtp = smtplib.SMTP(host, port, timeout=8)
             smtp.starttls()
         with smtp:
             user = os.environ.get("SMTP_USER")
@@ -622,13 +640,16 @@ def _lock_intake() -> None:
 def main() -> None:
     _lock_intake()
     print("Quote intake running. Telegram and email poll every cycle.")
+    last_mail = 0.0
     while True:
         try:
             if os.environ.get("TELEGRAM_BOT_TOKEN"):
                 poll_telegram_once()
             else:
                 time.sleep(5)
-            poll_email_once()
+            if time.time() - last_mail > 60:
+                poll_email_once()
+                last_mail = time.time()
         except Exception as exc:  # noqa: BLE001 — keep the intake loop alive
             message = str(exc)
             if "409" in message or "Conflict" in message:

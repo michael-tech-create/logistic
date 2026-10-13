@@ -18,6 +18,9 @@ from api.billing import verify_signature
 from api.exports import build_pdf, build_xlsx, pdf_to_text
 from api.store import PLANS, consume, grant_plan, login, register
 from automate import _decide_action, _looks_like_new_quote, _merge_follow_up, _quote_keyboard, _reject_absurd
+
+os.environ["SUPABASE_URL"] = ""
+os.environ["SUPABASE_SERVICE_ROLE_KEY"] = ""
 from customs import customs_lane, format_notice, to_customs_record
 from duty import estimate_duty
 from market import financing_offer, quote_views, validate_displayed_fx

@@ -618,7 +618,7 @@ def gemini_media_text(data: bytes, mime: str, instruction: str) -> str:
     if not keys:
         raise RuntimeError("GEMINI_API_KEYS is not set.")
     models = []
-    for name in (os.environ.get("GEMINI_MODEL"), "gemini-2.5-flash", "gemini-flash-lite-latest", "gemini-flash-latest"):
+    for name in (os.environ.get("GEMINI_MODEL") or "gemini-flash-lite-latest",):
         if name and name not in models:
             models.append(name)
     encoded = base64.b64encode(data).decode()
@@ -644,7 +644,7 @@ def gemini_media_text(data: bytes, mime: str, instruction: str) -> str:
                 headers={"Content-Type": "application/json", "User-Agent": "logistics-quote-api/1.0"},
             )
             try:
-                with urllib.request.urlopen(request, timeout=60) as response:
+                with urllib.request.urlopen(request, timeout=18) as response:
                     body = json.loads(response.read().decode())
                 parts = (((body.get("candidates") or [{}])[0].get("content") or {}).get("parts") or [])
                 text = "".join(part.get("text") or "" for part in parts).strip()
@@ -672,7 +672,7 @@ def _gemini_once(api_key: str, raw_quote_text: str, model: str) -> str:
     }).encode()
     request = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json", "User-Agent": "logistics-quote-api/1.0"})
     try:
-        with urllib.request.urlopen(request, timeout=45) as response:
+        with urllib.request.urlopen(request, timeout=12) as response:
             payload = json.loads(response.read().decode())
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")[:180]
@@ -778,24 +778,21 @@ def parse_freight_quote_llm(raw_quote_text: str) -> QuoteExtractionResult:
     if not keys:
         raise RuntimeError("GEMINI_API_KEYS is not set.")
     models = []
-    for name in (os.environ.get("GEMINI_MODEL"), "gemini-flash-lite-latest", "gemini-flash-latest"):
-        if name and name not in models:
-            models.append(name)
+    model = os.environ.get("GEMINI_MODEL") or "gemini-flash-lite-latest"
     start = _next_key_index(len(keys))
     errors: list[str] = []
     for offset in range(len(keys)):
         slot = (start + offset) % len(keys)
-        for model in models:
-            try:
-                raw = _gemini_once(keys[slot], raw_quote_text, model)
-                quote = _clean_model_quote(QuoteExtractionResult.model_validate(_coerce_quote_payload(json.loads(raw))))
-                quote.extraction_flags.append(f"Read by Gemini {model}, key {slot + 1} of {len(keys)}.")
-                return quote
-            except Exception as exc:  # noqa: BLE001 — limited keys rotate; a dead model tries the next model
-                message = str(exc).replace(keys[slot], "KEY")
-                errors.append(f"key {slot + 1} {model}: {message[:120]}")
-                if any(token in message for token in ("API_KEY_INVALID", "API key not valid", "permission")):
-                    break
+        try:
+            raw = _gemini_once(keys[slot], raw_quote_text, model)
+            quote = _clean_model_quote(QuoteExtractionResult.model_validate(_coerce_quote_payload(json.loads(raw))))
+            quote.extraction_flags.append(f"Read by Gemini {model}, key {slot + 1} of {len(keys)}.")
+            return quote
+        except Exception as exc:  # noqa: BLE001 — the next key is only for quota or a dead key
+            message = str(exc).replace(keys[slot], "KEY")
+            errors.append(f"key {slot + 1} {model}: {message[:120]}")
+            if not any(token in message for token in ("429", "quota", "API_KEY_INVALID", "API key not valid", "403")):
+                break
     raise RuntimeError("All Gemini keys failed. " + " | ".join(errors[:4]))
 
 
@@ -909,16 +906,23 @@ def _repair_route(raw_quote_text: str, quote: QuoteExtractionResult) -> QuoteExt
     return quote
 
 
+def _rules_priced(quote: QuoteExtractionResult) -> bool:
+    return bool(quote.financials.line_items) and float(quote.financials.total_amount or 0) > 0
+
+
 def parse_quote_smart(raw_quote_text: str) -> QuoteExtractionResult:
-    """Use Gemini when keys are set. Fall back to the rules parser if every key fails."""
+    """Price a structured quote locally. Call Gemini only when that reader finds no charge."""
+    rules = parse_freight_quote(raw_quote_text)
+    if _rules_priced(rules):
+        rules.extraction_flags.append("Priced by the rules reader.")
+        return _repair_route(raw_quote_text, rules)
     if not _gemini_keys():
-        quote = parse_freight_quote(raw_quote_text)
-        quote.extraction_flags.append("GEMINI_API_KEYS is not set. Used the rules parser.")
-        return _repair_route(raw_quote_text, quote)
+        rules.extraction_flags.append("GEMINI_API_KEYS is not set. Used the rules parser.")
+        return _repair_route(raw_quote_text, rules)
     try:
         quote = parse_freight_quote_llm(raw_quote_text)
     except Exception as exc:  # noqa: BLE001 — a live quote must still get a reply
-        quote = parse_freight_quote(raw_quote_text)
+        quote = rules
         quote.extraction_flags.append(f"Gemini failed ({exc}). Used the rules parser.")
     return _repair_route(raw_quote_text, quote)
 

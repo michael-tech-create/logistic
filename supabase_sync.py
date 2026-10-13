@@ -95,6 +95,17 @@ def sync_quote(record: dict, record_id: str, *, chat_id: str | None = None, tele
     return quote_id
 
 
+def delete_quote(record_id: str, company_id: str) -> bool:
+    if not (os.environ.get("SUPABASE_URL") and os.environ.get("SUPABASE_SERVICE_ROLE_KEY")):
+        return False
+    _request(
+        "DELETE",
+        f"quotes?record_id=eq.{urllib.parse.quote(record_id, safe='')}&company_id=eq.{urllib.parse.quote(company_id, safe='')}",
+        None,
+    )
+    return True
+
+
 def list_quotes(company_id: str) -> list[dict] | None:
     """Quotes for one company. None means Supabase is not configured."""
     if not (os.environ.get("SUPABASE_URL") and os.environ.get("SUPABASE_SERVICE_ROLE_KEY")):

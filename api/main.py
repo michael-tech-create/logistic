@@ -156,7 +156,8 @@ def _parse_for_user(user: dict, text: str) -> dict:
 
 @app.get("/health")
 def health():
-    return {"ok": True}
+    from api.store import using_cloud
+    return {"ok": True, "store": "supabase" if using_cloud() else "sqlite", "durable": using_cloud()}
 
 
 class RateBody(BaseModel):
@@ -308,13 +309,18 @@ def delete_inbox_record(record_id: str, authorization: str | None = Header(defau
     company_id = ensure_company(user)["code"]
     if not re.fullmatch(r"[A-Za-z0-9_-]+", record_id):
         raise HTTPException(400, "Unknown quote id.")
+    from supabase_sync import delete_quote
+
+    removed = delete_quote(record_id, company_id)
     path = ROOT / "state" / "records" / f"{record_id}.json"
-    if not path.is_file():
+    if path.is_file():
+        record = json.loads(path.read_text(encoding="utf-8"))
+        if _company_id(record) != company_id:
+            raise HTTPException(404, "Quote not found.")
+        path.unlink()
+        removed = True
+    if not removed:
         raise HTTPException(404, "Quote not found.")
-    record = json.loads(path.read_text(encoding="utf-8"))
-    if _company_id(record) != company_id:
-        raise HTTPException(404, "Quote not found.")
-    path.unlink()
     return {"deleted": record_id}
 
 
@@ -324,6 +330,8 @@ def auth_register(body: RegisterBody):
         user = register(body.email, body.password, body.business_name, body.home_country)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc)) from exc
     session = login(body.email, body.password)
     return session
 
@@ -334,6 +342,8 @@ def auth_login(body: LoginBody):
         return login(body.email, body.password)
     except ValueError as exc:
         raise HTTPException(401, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc)) from exc
 
 
 @app.get("/v1/me")
@@ -482,8 +492,8 @@ class ReviewBody(BaseModel):
 
 @app.get("/v1/reviews")
 def reviews(authorization: str | None = Header(default=None), x_api_key: str | None = Header(default=None)):
-    current_user(authorization, x_api_key)
-    return {"reviews": list_reviews()}
+    user = current_user(authorization, x_api_key)
+    return {"reviews": list_reviews(ensure_company(user)["code"])}
 
 
 @app.post("/v1/reviews/{review_id}")
@@ -494,16 +504,17 @@ def review_decision(review_id: int, body: ReviewBody, authorization: str | None 
     from actions import execute_approved
     from api.store import get_review
 
-    current = get_review(review_id)
+    company_id = ensure_company(current_user(authorization, x_api_key))["code"]
+    current = get_review(review_id, company_id)
     if current is None:
         raise HTTPException(404, "Review not found.")
     if body.status == "approved" and current.get("kind") in {"pay", "clear"}:
         result = execute_approved(current)
         status = "executed" if result["done"] else "pending"
-        row = resolve_review(review_id, status, result["note"])
+        row = resolve_review(review_id, status, result["note"], company_id)
         return {**row, "execution": result}
     try:
-        row = resolve_review(review_id, body.status)
+        row = resolve_review(review_id, body.status, None, company_id)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     if row is None:

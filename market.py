@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 import urllib.request
 from pathlib import Path
 
@@ -70,20 +71,29 @@ def save_fx_settings(updates: dict) -> dict:
     return current
 
 
+_MARKET_CACHE: dict = {"at": 0.0, "data": None}
+
+
 def fetch_market_rates() -> dict:
+    now = time.time()
+    if _MARKET_CACHE["data"] is not None and now - _MARKET_CACHE["at"] < 600:
+        return _MARKET_CACHE["data"]
     request = urllib.request.Request(OPEN_FX, headers={"User-Agent": "logistics-quote-api/1.0"})
-    with urllib.request.urlopen(request, timeout=12) as response:
+    with urllib.request.urlopen(request, timeout=4) as response:
         payload = json.loads(response.read().decode())
     rates = payload.get("rates") or {}
     usd_ngn = float(rates["NGN"])
     cny_per_usd = float(rates["CNY"])
-    return {
+    result = {
         "source": "open.er-api.com mid-market",
         "as_of": payload.get("time_last_update_utc"),
         "usd_ngn": round(usd_ngn, 4),
         "usd_cny": round(cny_per_usd, 4),
         "cny_ngn": round(usd_ngn / cny_per_usd, 4),
     }
+    _MARKET_CACHE["at"] = now
+    _MARKET_CACHE["data"] = result
+    return result
 
 
 def _money(amount: float, rate: float | None) -> float | None:

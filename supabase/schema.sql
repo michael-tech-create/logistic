@@ -50,3 +50,71 @@ create table if not exists public.quote_splits (
 alter table public.quotes enable row level security;
 alter table public.line_items enable row level security;
 alter table public.quote_splits enable row level security;
+
+-- Agency accounts. The API uses the service role key. Render's disk is not the database.
+create table if not exists public.users (
+    id bigint generated always as identity primary key,
+    email text not null unique,
+    password_hash text not null,
+    business_name text not null,
+    home_country text default 'Nigeria',
+    api_key text not null unique,
+    quota_remaining integer not null,
+    period_end bigint,
+    created_at bigint not null,
+    plan_code text default 'trial',
+    plan_parses integer default 5,
+    company_code text
+);
+
+create table if not exists public.sessions (
+    token text primary key,
+    user_id bigint not null references public.users (id) on delete cascade,
+    created_at bigint not null
+);
+
+create table if not exists public.companies (
+    id bigint generated always as identity primary key,
+    user_id bigint not null unique references public.users (id) on delete cascade,
+    code text not null unique,
+    legal_name text not null,
+    home_country text,
+    telegram_chat_ids jsonb not null default '[]'::jsonb,
+    inbound_emails jsonb not null default '[]'::jsonb,
+    port_risk_level text not null default 'normal',
+    custom_parallel_ngn numeric,
+    notify_email text
+);
+
+create table if not exists public.payments (
+    reference text primary key,
+    email text not null,
+    created_at bigint not null
+);
+
+create table if not exists public.batches (
+    id text primary key,
+    user_id bigint not null references public.users (id) on delete cascade,
+    payload jsonb not null,
+    created_at bigint not null
+);
+
+create table if not exists public.human_reviews (
+    id bigint generated always as identity primary key,
+    company_id text,
+    kind text not null,
+    summary text not null,
+    detail text,
+    chat_id text,
+    status text not null default 'pending',
+    created_at bigint not null,
+    payload jsonb,
+    execution_note text
+);
+
+alter table public.users enable row level security;
+alter table public.sessions enable row level security;
+alter table public.companies enable row level security;
+alter table public.payments enable row level security;
+alter table public.batches enable row level security;
+alter table public.human_reviews enable row level security;

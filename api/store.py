@@ -161,7 +161,23 @@ def _check_password(password: str, stored: str) -> bool:
     return secrets.compare_digest(check, digest)
 
 
+def using_cloud() -> bool:
+    return bool(os.environ.get("SUPABASE_URL") and os.environ.get("SUPABASE_SERVICE_ROLE_KEY"))
+
+
+def _require_durable() -> None:
+    if os.environ.get("RENDER") == "true" and not using_cloud():
+        raise RuntimeError(
+            "Supabase is not configured. Accounts and quotes would be wiped when Render restarts. "
+            "Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY, then run supabase/schema.sql."
+        )
+
+
 def register(email: str, password: str, business_name: str, home_country: str = "Nigeria") -> dict:
+    _require_durable()
+    if using_cloud():
+        from api.cloud_store import register as cloud_register
+        return cloud_register(email, password, business_name, home_country)
     conn = connect()
     api_key = "qk_" + secrets.token_urlsafe(24)
     now = int(time.time())
@@ -189,6 +205,10 @@ def register(email: str, password: str, business_name: str, home_country: str = 
 
 
 def login(email: str, password: str) -> dict:
+    _require_durable()
+    if using_cloud():
+        from api.cloud_store import login as cloud_login
+        return cloud_login(email, password)
     conn = connect()
     user = conn.execute("SELECT * FROM users WHERE email = ?", (email.lower().strip(),)).fetchone()
     if user is None or not _check_password(password, user["password_hash"]):
@@ -204,6 +224,9 @@ def login(email: str, password: str) -> dict:
 def user_by_token(token: str | None) -> dict | None:
     if not token:
         return None
+    if using_cloud():
+        from api.cloud_store import user_by_token as cloud_user_by_token
+        return cloud_user_by_token(token)
     conn = connect()
     row = conn.execute(
         """
@@ -218,6 +241,9 @@ def user_by_token(token: str | None) -> dict | None:
 def user_by_api_key(api_key: str | None) -> dict | None:
     if not api_key:
         return None
+    if using_cloud():
+        from api.cloud_store import user_by_api_key as cloud_user_by_api_key
+        return cloud_user_by_api_key(api_key)
     conn = connect()
     row = conn.execute("SELECT * FROM users WHERE api_key = ?", (api_key,)).fetchone()
     return dict(row) if row else None
@@ -244,6 +270,9 @@ def public_user(user: dict) -> dict:
 
 
 def consume(user_id: int, count: int = 1) -> dict:
+    if using_cloud():
+        from api.cloud_store import consume as cloud_consume
+        return cloud_consume(user_id, count)
     conn = connect()
     row = conn.execute("SELECT quota_remaining FROM users WHERE id = ?", (user_id,)).fetchone()
     if row is None:
@@ -266,6 +295,9 @@ def grant_plan(email: str, reference: str | None = None, plan_code: str = PLAN_C
     plan = PLANS.get(plan_code)
     if plan is None:
         raise ValueError(f"Unknown plan {plan_code}.")
+    if using_cloud():
+        from api.cloud_store import grant_plan as cloud_grant_plan
+        return cloud_grant_plan(email, reference, plan_code)
     conn = connect()
     email = email.lower().strip()
     if reference:
@@ -293,6 +325,9 @@ def grant_plan(email: str, reference: str | None = None, plan_code: str = PLAN_C
 
 
 def save_batch(user_id: int, batch_id: str, payload: str) -> None:
+    if using_cloud():
+        from api.cloud_store import save_batch as cloud_save_batch
+        return cloud_save_batch(user_id, batch_id, payload)
     conn = connect()
     conn.execute(
         "INSERT INTO batches (id, user_id, payload, created_at) VALUES (?, ?, ?, ?)",
@@ -302,6 +337,9 @@ def save_batch(user_id: int, batch_id: str, payload: str) -> None:
 
 
 def load_batch(user_id: int, batch_id: str) -> dict | None:
+    if using_cloud():
+        from api.cloud_store import load_batch as cloud_load_batch
+        return cloud_load_batch(user_id, batch_id)
     conn = connect()
     row = conn.execute(
         "SELECT payload FROM batches WHERE id = ? AND user_id = ?",
@@ -315,6 +353,9 @@ def load_batch(user_id: int, batch_id: str) -> dict | None:
 
 
 def ensure_company(user: dict) -> dict:
+    if using_cloud():
+        from api.cloud_store import ensure_company as cloud_ensure_company
+        return cloud_ensure_company(user)
     conn = connect()
     row = conn.execute("SELECT * FROM companies WHERE user_id = ?", (user["id"],)).fetchone()
     if row:
@@ -345,49 +386,84 @@ def _ensure_reviews(conn) -> None:
         )
         """
     )
-    for column, kind in (("payload", "TEXT"), ("execution_note", "TEXT")):
+    for column, kind in (("payload", "TEXT"), ("execution_note", "TEXT"), ("company_id", "TEXT")):
         try:
             conn.execute(f"ALTER TABLE human_reviews ADD COLUMN {column} {kind}")
         except Exception:
             pass
 
 
-def queue_human_review(kind: str, summary: str, chat_id: str | None = None, detail: str = "", payload: dict | None = None) -> dict:
+def queue_human_review(kind: str, summary: str, chat_id: str | None = None, detail: str = "", payload: dict | None = None, company_id: str | None = None) -> dict:
     import json
 
+    if company_id is None and chat_id:
+        for business in company_businesses():
+            if str(chat_id) in {str(item) for item in business.get("telegram_chat_ids") or []}:
+                company_id = business["id"]
+                break
+    if using_cloud():
+        from api.cloud_store import queue_human_review as cloud_queue
+        return cloud_queue(kind, summary, chat_id, detail, payload, company_id)
     conn = connect()
     _ensure_reviews(conn)
     cur = conn.execute(
-        "INSERT INTO human_reviews (kind, summary, detail, chat_id, status, created_at, payload) VALUES (?, ?, ?, ?, 'pending', ?, ?)",
-        (kind, summary, detail, chat_id, int(time.time()), json.dumps(payload) if payload else None),
+        "INSERT INTO human_reviews (kind, summary, detail, chat_id, status, created_at, payload, company_id) VALUES (?, ?, ?, ?, 'pending', ?, ?, ?)",
+        (kind, summary, detail, chat_id, int(time.time()), json.dumps(payload) if payload else None, company_id),
     )
     conn.commit()
     return {"id": cur.lastrowid, "kind": kind, "status": "pending", "summary": summary}
 
 
-def list_reviews() -> list[dict]:
+def list_reviews(company_id: str | None = None) -> list[dict]:
+    if using_cloud():
+        from api.cloud_store import list_reviews as cloud_list_reviews
+        return cloud_list_reviews(company_id)
     conn = connect()
     _ensure_reviews(conn)
-    rows = conn.execute("SELECT * FROM human_reviews ORDER BY id DESC LIMIT 30").fetchall()
+    if company_id:
+        rows = conn.execute(
+            "SELECT * FROM human_reviews WHERE company_id = ? OR company_id IS NULL ORDER BY id DESC LIMIT 30",
+            (company_id,),
+        ).fetchall()
+    else:
+        rows = conn.execute("SELECT * FROM human_reviews ORDER BY id DESC LIMIT 30").fetchall()
     return [dict(row) for row in rows]
 
 
-def get_review(review_id: int) -> dict | None:
+def get_review(review_id: int, company_id: str | None = None) -> dict | None:
+    if using_cloud():
+        from api.cloud_store import get_review as cloud_get_review
+        return cloud_get_review(review_id, company_id)
     conn = connect()
     _ensure_reviews(conn)
-    row = conn.execute("SELECT * FROM human_reviews WHERE id = ?", (review_id,)).fetchone()
+    if company_id:
+        row = conn.execute(
+            "SELECT * FROM human_reviews WHERE id = ? AND (company_id = ? OR company_id IS NULL)",
+            (review_id, company_id),
+        ).fetchone()
+    else:
+        row = conn.execute("SELECT * FROM human_reviews WHERE id = ?", (review_id,)).fetchone()
     return dict(row) if row else None
 
 
-def resolve_review(review_id: int, status: str, execution_note: str | None = None) -> dict | None:
+def resolve_review(review_id: int, status: str, execution_note: str | None = None, company_id: str | None = None) -> dict | None:
     if status not in {"approved", "rejected", "executed", "pending"}:
         raise ValueError("Status must be approved, rejected, executed, or pending.")
+    if using_cloud():
+        from api.cloud_store import resolve_review as cloud_resolve_review
+        return cloud_resolve_review(review_id, status, execution_note, company_id)
     conn = connect()
     _ensure_reviews(conn)
-    conn.execute(
-        "UPDATE human_reviews SET status = ?, execution_note = ? WHERE id = ?",
-        (status, execution_note, review_id),
-    )
+    if company_id:
+        conn.execute(
+            "UPDATE human_reviews SET status = ?, execution_note = ? WHERE id = ? AND company_id = ?",
+            (status, execution_note, review_id, company_id),
+        )
+    else:
+        conn.execute(
+            "UPDATE human_reviews SET status = ?, execution_note = ? WHERE id = ?",
+            (status, execution_note, review_id),
+        )
     conn.commit()
     row = conn.execute("SELECT * FROM human_reviews WHERE id = ?", (review_id,)).fetchone()
     return dict(row) if row else None
@@ -395,6 +471,9 @@ def resolve_review(review_id: int, status: str, execution_note: str | None = Non
 
 def link_telegram(code: str, chat_id: str) -> dict | None:
     import json
+    if using_cloud():
+        from api.cloud_store import link_telegram as cloud_link_telegram
+        return cloud_link_telegram(code, chat_id)
     conn = connect()
     row = conn.execute("SELECT * FROM companies WHERE code = ?", (code.strip(),)).fetchone()
     if row is None:
@@ -411,6 +490,12 @@ def link_telegram(code: str, chat_id: str) -> dict | None:
 
 def company_businesses() -> list[dict]:
     import json
+    if using_cloud():
+        from api.cloud_store import company_businesses as cloud_company_businesses
+        try:
+            return cloud_company_businesses()
+        except Exception as exc:  # noqa: BLE001 — a missing Supabase table must not stop the bot
+            print(f"[store] companies unavailable: {exc}")
     conn = connect()
     rows = conn.execute("SELECT * FROM companies").fetchall()
     businesses = []
@@ -435,6 +520,12 @@ PORT_BUFFERS = {"normal": 350_000, "elevated": 900_000, "severe": 1_800_000}
 
 def port_risk_level(company_code: str | None = None) -> str:
     """Company override, then the global default of normal."""
+    if using_cloud():
+        from api.cloud_store import port_risk_level as cloud_port_risk_level
+        try:
+            return cloud_port_risk_level(company_code)
+        except Exception as exc:  # noqa: BLE001 — use the local default if Supabase is down
+            print(f"[store] port risk unavailable: {exc}")
     conn = connect()
     if company_code:
         row = conn.execute(
@@ -450,6 +541,9 @@ def port_risk_level(company_code: str | None = None) -> str:
 def set_port_risk(level: str, company_code: str | None = None) -> dict:
     if level not in PORT_BUFFERS:
         raise ValueError("Level must be normal, elevated, or severe.")
+    if using_cloud():
+        from api.cloud_store import set_port_risk as cloud_set_port_risk
+        return cloud_set_port_risk(level, company_code)
     conn = connect()
     if company_code:
         updated = conn.execute(
@@ -468,6 +562,9 @@ def set_port_risk(level: str, company_code: str | None = None) -> dict:
 
 
 def set_company_parallel(company_code: str, rate: float | None) -> None:
+    if using_cloud():
+        from api.cloud_store import set_company_parallel as cloud_set_company_parallel
+        return cloud_set_company_parallel(company_code, rate)
     conn = connect()
     conn.execute(
         "UPDATE companies SET custom_parallel_ngn = ? WHERE code = ?",
@@ -479,6 +576,9 @@ def set_company_parallel(company_code: str, rate: float | None) -> None:
 def company_parallel(company_code: str | None) -> float | None:
     if not company_code:
         return None
+    if using_cloud():
+        from api.cloud_store import company_parallel as cloud_company_parallel
+        return cloud_company_parallel(company_code)
     conn = connect()
     row = conn.execute(
         "SELECT custom_parallel_ngn FROM companies WHERE code = ?",
