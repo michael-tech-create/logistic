@@ -47,6 +47,16 @@ create table if not exists public.quote_splits (
     created_at timestamptz not null default now()
 );
 
+create table if not exists public.market_rates (
+    id bigint generated always as identity primary key,
+    lane text not null,
+    equipment text not null,
+    mode text not null,
+    freight_ngn numeric not null,
+    created_at timestamptz not null default now()
+);
+
+alter table public.market_rates enable row level security;
 alter table public.quotes enable row level security;
 alter table public.line_items enable row level security;
 alter table public.quote_splits enable row level security;

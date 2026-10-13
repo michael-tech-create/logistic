@@ -672,7 +672,7 @@ def _gemini_once(api_key: str, raw_quote_text: str, model: str) -> str:
     }).encode()
     request = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json", "User-Agent": "logistics-quote-api/1.0"})
     try:
-        with urllib.request.urlopen(request, timeout=12) as response:
+        with urllib.request.urlopen(request, timeout=30) as response:
             payload = json.loads(response.read().decode())
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")[:180]

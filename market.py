@@ -78,6 +78,13 @@ def fetch_market_rates() -> dict:
     now = time.time()
     if _MARKET_CACHE["data"] is not None and now - _MARKET_CACHE["at"] < 600:
         return _MARKET_CACHE["data"]
+    from cache import get_json, set_json
+
+    cached = get_json("fx:market")
+    if isinstance(cached, dict) and cached.get("usd_ngn"):
+        _MARKET_CACHE["at"] = now
+        _MARKET_CACHE["data"] = cached
+        return cached
     request = urllib.request.Request(OPEN_FX, headers={"User-Agent": "logistics-quote-api/1.0"})
     with urllib.request.urlopen(request, timeout=4) as response:
         payload = json.loads(response.read().decode())
@@ -93,6 +100,9 @@ def fetch_market_rates() -> dict:
     }
     _MARKET_CACHE["at"] = now
     _MARKET_CACHE["data"] = result
+    from cache import set_json
+
+    set_json("fx:market", result, 600)
     return result
 
 

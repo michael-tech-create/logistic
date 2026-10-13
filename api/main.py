@@ -79,6 +79,20 @@ class ParseBody(BaseModel):
     text: str
 
 
+class ScrapeBody(BaseModel):
+    terminal: str
+    container: str
+    chat_id: str | None = None
+    whatsapp_to: str | None = None
+
+
+class CompareBody(BaseModel):
+    record_ids: list[str]
+    agreed_freight_ngn: float | None = None
+    equipment: str = "40ft"
+    mode: str = "ocean"
+
+
 class TerminalStatus(BaseModel):
     container: str = ""
     gate_out: str = ""
@@ -157,7 +171,20 @@ def _parse_for_user(user: dict, text: str) -> dict:
 @app.get("/health")
 def health():
     from api.store import using_cloud
-    return {"ok": True, "store": "supabase" if using_cloud() else "sqlite", "durable": using_cloud()}
+    redis_ok = False
+    try:
+        from cache import redis_client
+
+        client = redis_client()
+        redis_ok = bool(client and client.ping())
+    except Exception:
+        redis_ok = False
+    return {
+        "ok": True,
+        "store": "supabase" if using_cloud() else "sqlite",
+        "durable": using_cloud(),
+        "redis": redis_ok,
+    }
 
 
 class RateBody(BaseModel):
@@ -520,6 +547,112 @@ def review_decision(review_id: int, body: ReviewBody, authorization: str | None 
     if row is None:
         raise HTTPException(404, "Review not found.")
     return row
+
+
+@app.post("/v1/whatsapp/send")
+def whatsapp_send(body: dict, authorization: str | None = Header(default=None), x_api_key: str | None = Header(default=None)):
+    current_user(authorization, x_api_key)
+    from desk_ops import WhatsAppSend, send_whatsapp
+
+    try:
+        payload = WhatsAppSend.model_validate(body)
+        return send_whatsapp(payload)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.post("/v1/quotes/{record_id}/resolve-flag")
+def resolve_quote_flag(
+    record_id: str,
+    body: dict,
+    authorization: str | None = Header(default=None),
+    x_api_key: str | None = Header(default=None),
+):
+    user = current_user(authorization, x_api_key)
+    from desk_ops import FlagResolution, load_record, resolve_flag, save_record
+
+    record = load_record(record_id)
+    company = ensure_company(user)["code"]
+    owner = record.get("company_id") if record else None
+    if record is None or (owner and owner != company):
+        raise HTTPException(404, "Quote not found.")
+    try:
+        action = FlagResolution.model_validate(body)
+        result = resolve_flag(record, action.flag_id, action.option, action.actor)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    save_record(record_id, record)
+    pdf = None
+    if result["recalculated"]:
+        import base64
+
+        pdf = base64.b64encode(build_pdf([record], user["business_name"])).decode()
+    return {**result, "record_id": record_id, "pdf_base64": pdf, "total_amount": (record.get("commercial") or {}).get("total_amount")}
+
+
+@app.post("/v1/terminal/scrape")
+def terminal_scrape(body: ScrapeBody, authorization: str | None = Header(default=None), x_api_key: str | None = Header(default=None)):
+    current_user(authorization, x_api_key)
+    from desk_ops import WhatsAppSend, send_whatsapp
+    from terminal_scrape import needs_free_time_alert, scrape_container
+
+    try:
+        status = scrape_container(body.terminal, body.container)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    alerted = False
+    if needs_free_time_alert(status):
+        text = (
+            f"Free time alert: {status.container} at {status.terminal} has "
+            f"{status.free_hours_remaining} hours left. Vessel {status.vessel_name or 'n/a'}. "
+            f"Yard {status.yard_location or 'n/a'}. Demurrage NGN {status.demurrage_liability_ngn:,.0f}."
+        )
+        _alert_telegram(text, body.chat_id)
+        if body.whatsapp_to:
+            send_whatsapp(WhatsAppSend(to=body.whatsapp_to, body=text, priority="high"))
+        alerted = True
+    return {**status.model_dump(), "alerted": alerted}
+
+
+@app.post("/v1/quotes/compare")
+def compare_quotes(body: CompareBody, authorization: str | None = Header(default=None), x_api_key: str | None = Header(default=None)):
+    user = current_user(authorization, x_api_key)
+    from desk_ops import comparison_matrix, load_record, matrix_files, save_market_rate
+
+    company = ensure_company(user)["code"]
+    if not 1 <= len(body.record_ids) <= 3:
+        raise HTTPException(400, "Send 1 to 3 quote ids.")
+    records = []
+    for record_id in body.record_ids:
+        record = load_record(record_id)
+        owner = (record or {}).get("company_id")
+        if record is None or (owner and owner != company):
+            raise HTTPException(404, f"Quote {record_id} not found.")
+        records.append(record)
+    try:
+        matrix = comparison_matrix(records)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    benchmark = None
+    if body.agreed_freight_ngn:
+        benchmark = save_market_rate(matrix["lane"], body.agreed_freight_ngn, body.equipment, body.mode)
+    xlsx, pdf = matrix_files(matrix, user["business_name"])
+    import base64
+
+    return {
+        "matrix": matrix,
+        "benchmark": benchmark,
+        "xlsx_base64": base64.b64encode(xlsx).decode(),
+        "pdf_base64": base64.b64encode(pdf).decode(),
+    }
+
+
+@app.get("/v1/market-rates")
+def market_rates(lane: str, equipment: str = "40ft", authorization: str | None = Header(default=None), x_api_key: str | None = Header(default=None)):
+    current_user(authorization, x_api_key)
+    from desk_ops import lane_benchmark
+
+    return lane_benchmark(lane, equipment)
 
 
 @app.post("/v1/terminal/status")

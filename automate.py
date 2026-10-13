@@ -176,18 +176,19 @@ def _quote_keyboard(record_id: str) -> dict:
     ]}
 
 
-def _compare_path(chat_id: str) -> Path:
-    folder = STATE_DIR / "compare"
-    folder.mkdir(parents=True, exist_ok=True)
-    return folder / f"{chat_id}.json"
+def _compare_ids(chat_id: str) -> list:
+    from cache import get_json
+
+    ids = get_json(f"compare:{chat_id}")
+    return ids if isinstance(ids, list) else []
 
 
 def _remember_compare(chat_id: str, record_id: str) -> None:
-    path = _compare_path(chat_id)
-    ids = json.loads(path.read_text()) if path.exists() else []
-    ids = [item for item in ids if item != record_id]
+    from cache import set_json
+
+    ids = [item for item in _compare_ids(chat_id) if item != record_id]
     ids.append(record_id)
-    path.write_text(json.dumps(ids[-3:]))
+    set_json(f"compare:{chat_id}", ids[-3:], 7 * 24 * 3600)
 
 
 def _load_record(record_id: str) -> dict | None:
@@ -200,8 +201,7 @@ def _load_record(record_id: str) -> dict | None:
 
 
 def _compare_text(chat_id: str) -> str:
-    path = _compare_path(chat_id)
-    ids = json.loads(path.read_text()) if path.exists() else []
+    ids = _compare_ids(chat_id)
     rows = []
     for record_id in ids:
         record = _load_record(record_id)
@@ -246,7 +246,11 @@ def _handle_callback(callback: dict) -> None:
     if data == "compare":
         send_telegram(chat_id, _compare_text(chat_id))
         return
-    action, _, record_id = data.partition(":")
+    action, _, rest = data.partition(":")
+    if action == "rf":
+        record_id, _, _code = rest.partition(":")
+    else:
+        record_id = rest
     record = _load_record(record_id)
     if record is None:
         send_telegram(chat_id, "That quote is no longer on the desk.")
@@ -260,19 +264,38 @@ def _handle_callback(callback: dict) -> None:
         share = urllib.parse.quote((format_notice(record))[:1500])
         send_telegram(chat_id, f"https://wa.me/?text={share}")
     elif action == "flags":
-        from customs import _missing_questions
+        from desk_ops import TELEGRAM_CODES, detect_operational_flags
 
-        questions = _missing_questions(record)
-        commercial = record.get("commercial") or {}
-        movement = record.get("movement") or {}
-        from quote_agent import lock_domestic_incoterm
+        buttons = []
+        code_by_action = {value: key for key, value in TELEGRAM_CODES.items()}
+        for flag in detect_operational_flags(record):
+            row = []
+            for option in flag["options"]:
+                code = code_by_action[(flag["flag_id"], option["id"])]
+                row.append({"text": option["label"], "callback_data": f"rf:{record_id}:{code}"})
+            buttons.append(row)
+        if buttons:
+            send_telegram(chat_id, "Choose how to close each open flag.", {"inline_keyboard": buttons})
+        else:
+            send_telegram(chat_id, "This quote has no open operational flag.")
+    elif action == "rf":
+        from desk_ops import TELEGRAM_CODES, resolve_flag, save_record
+        from api.exports import build_pdf
 
-        lock_domestic_incoterm(record)
-        if record.get("lane") != "domestic" and not commercial.get("incoterms"):
-            questions.append("What incoterm applies, such as CIF or FOB?")
-        if not movement.get("package"):
-            questions.append("What container or package type is this?")
-        send_telegram(chat_id, questions[0] if questions else "This quote has no missing field I can see. Send a correction if something is wrong.")
+        code = data.split(":")[-1]
+        pair = TELEGRAM_CODES.get(code)
+        if pair is None:
+            send_telegram(chat_id, "That flag action is not recognized.")
+            return
+        try:
+            result = resolve_flag(record, pair[0], pair[1], actor=f"telegram:{chat_id}")
+        except ValueError as exc:
+            send_telegram(chat_id, str(exc))
+            return
+        save_record(record_id, record, chat_id=chat_id)
+        send_telegram(chat_id, result["note"])
+        if result["recalculated"]:
+            _send_file(chat_id, f"{record_id}.pdf", build_pdf([record], business), "Updated client quote PDF")
 
 
 def _bind_chat(chat_id: str) -> str | None:
@@ -293,27 +316,23 @@ def _bind_chat(chat_id: str) -> str | None:
     return business["id"]
 
 
-def _dialog_path(chat_id: str) -> Path:
-    folder = STATE_DIR / "dialogs"
-    folder.mkdir(parents=True, exist_ok=True)
-    return folder / f"{chat_id}.json"
-
-
 def _load_dialog(chat_id: str) -> dict | None:
-    path = _dialog_path(chat_id)
-    if not path.exists():
-        return None
-    return json.loads(path.read_text(encoding="utf-8"))
+    from cache import get_json
+
+    data = get_json(f"dialog:{chat_id}")
+    return data if isinstance(data, dict) else None
 
 
 def _save_dialog(chat_id: str, raw: str) -> None:
-    _dialog_path(chat_id).write_text(json.dumps({"raw": raw}), encoding="utf-8")
+    from cache import set_json
+
+    set_json(f"dialog:{chat_id}", {"raw": raw}, 24 * 3600)
 
 
 def _clear_dialog(chat_id: str) -> None:
-    path = _dialog_path(chat_id)
-    if path.exists():
-        path.unlink()
+    from cache import delete
+
+    delete(f"dialog:{chat_id}")
 
 
 def _looks_like_new_quote(text: str) -> bool:
@@ -463,8 +482,13 @@ def _finish_quote(chat_id, outcome, decision, held, quote_text, record, record_i
 
 
 def poll_telegram_once() -> int:
+    from cache import get_text, set_text
+
     offset = 0
-    if OFFSET_PATH.exists():
+    saved = get_text("tg:offset")
+    if saved and saved.strip().isdigit():
+        offset = int(saved.strip())
+    elif OFFSET_PATH.exists():
         offset = int(OFFSET_PATH.read_text().strip() or "0")
     body = telegram_api("getUpdates", {"timeout": 25, "offset": offset})
     handled = 0
@@ -492,8 +516,7 @@ def poll_telegram_once() -> int:
         except Exception as exc:  # noqa: BLE001 — advance past a message that already failed once
             print(f"[intake] update skipped: {exc}")
         finally:
-            STATE_DIR.mkdir(exist_ok=True)
-            OFFSET_PATH.write_text(str(offset))
+            set_text("tg:offset", str(offset))
     return handled
 
 
@@ -542,7 +565,13 @@ def poll_email_once() -> int:
     password = os.environ.get("IMAP_PASSWORD")
     if not (host and user and password):
         return 0
-    seen = set(json.loads(SEEN_PATH.read_text())) if SEEN_PATH.exists() else set()
+    from cache import get_json, set_json
+
+    seen_raw = get_json("mail:seen")
+    if isinstance(seen_raw, list):
+        seen = set(seen_raw)
+    else:
+        seen = set(json.loads(SEEN_PATH.read_text())) if SEEN_PATH.exists() else set()
     handled = 0
     client = imaplib.IMAP4_SSL(host, int(os.environ.get("IMAP_PORT", "993")))
     try:
@@ -599,8 +628,7 @@ def poll_email_once() -> int:
             client.logout()
         except imaplib.IMAP4.error:
             pass
-    STATE_DIR.mkdir(exist_ok=True)
-    SEEN_PATH.write_text(json.dumps(sorted(seen)))
+    set_json("mail:seen", sorted(seen)[-500:])
     return handled
 
 

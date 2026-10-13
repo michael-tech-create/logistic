@@ -1,5 +1,6 @@
 """Unit checks for each project module. No live Telegram or payment calls."""
 
+import json
 import os
 import tempfile
 import unittest
@@ -297,6 +298,89 @@ class ApiTests(unittest.TestCase):
         self.assertTrue(down.json()["feed_down"])
         listed = CLIENT.get("/v1/reviews", headers=headers)
         self.assertTrue(any(row["kind"] == "terminal" for row in listed.json()["reviews"]))
+
+
+class DeskOpsTests(unittest.TestCase):
+    def test_cap_recalculates_and_matrix_indexes_lane(self):
+        from desk_ops import comparison_matrix, detect_operational_flags, lane_benchmark, resolve_flag, save_market_rate
+        from terminal_scrape import free_time, parse_container_page
+        from datetime import datetime, timedelta, timezone
+
+        record = {
+            "company_id": "co-test",
+            "commercial": {"vendor_name": "Maersk", "currency": "NGN", "total_amount": 200000, "valid_until": "48 hours", "payment_terms": "70% gate-in"},
+            "movement": {"origin": {"location_name": "Ningbo"}, "destination": {"location_name": "Apapa"}, "est_transit_days": 32},
+            "line_items": [
+                {"description": "Ocean freight", "amount": 100000},
+                {"description": "Local access bridge", "amount": 80000},
+                {"description": "Gate-in", "amount": 20000},
+            ],
+            "fx": {"cbn": {"NGN": 200000}},
+            "demurrage": {"free_days": 5, "daily_rate_ngn": 15000},
+            "extraction_flags": [],
+        }
+        self.assertEqual({item["flag_id"] for item in detect_operational_flags(record)}, {"validity_48h", "uncapped_local_access", "gate_in_70"})
+        result = resolve_flag(record, "uncapped_local_access", "cap_50000")
+        self.assertTrue(result["recalculated"])
+        self.assertEqual(record["commercial"]["total_amount"], 170000)
+        resolve_flag(record, "gate_in_70", "split_50_50")
+        self.assertEqual(record["line_items"][2]["amount"], round(20000 / 0.70 * 0.50, 2))
+        matrix = comparison_matrix([record])
+        self.assertEqual(matrix["lane"], "Ningbo -> Apapa")
+        save_market_rate("Apapa -> Makurdi", 1_850_000, "40ft Flatbed", "road")
+        bench = lane_benchmark("Apapa -> Makurdi", "40ft Flatbed")
+        self.assertEqual(bench["average_ngn"], 1_850_000)
+        self.assertIn("1,850,000", bench["headline"])
+
+        past = datetime.now(timezone.utc) - timedelta(days=9)
+        clock = free_time(past, 7)
+        self.assertLess(clock["free_hours_remaining"], 0)
+        self.assertGreater(clock["demurrage_liability_ngn"], 0)
+        html = "Container MSKU1234567 vessel: GRANDE LAGOS discharge: 2026-10-01 yard: Block C4 free days: 5"
+        status = parse_container_page("ptml", "MSKU1234567", html, "fixture")
+        self.assertTrue(status.found)
+        self.assertEqual(status.vessel_name, "GRANDE LAGOS")
+        missing = parse_container_page("ptml", "MSKU1234567", "<p>no boxes</p>", "fixture")
+        self.assertFalse(missing.found)
+
+    def test_resolve_endpoint_regenerates_pdf(self):
+        reg = CLIENT.post("/v1/auth/register", json={"email": "flags@example.com", "password": "secret-pass", "business_name": "Flag Co"})
+        self.assertEqual(reg.status_code, 200, reg.text)
+        code = reg.json()["company_code"]
+        token = reg.json()["token"]
+        record = {
+            "company_id": code,
+            "business": {"id": code, "legal_name": "Flag Co"},
+            "lane": "import",
+            "commercial": {"vendor_name": "MSC", "currency": "NGN", "total_amount": 80000, "valid_until": "48 hours", "payment_terms": "70% before gate-in", "incoterms": "CIF"},
+            "movement": {"mode": "Ocean", "origin": {"location_name": "Ningbo"}, "destination": {"location_name": "Apapa"}, "est_transit_days": 30},
+            "line_items": [{"description": "Local access", "category": "destination", "amount": 80000}],
+            "fx": {"cbn": {"NGN": 80000}},
+            "disclaimer": "Desk estimate.",
+        }
+        path = os.path.join(os.path.dirname(__file__), "..", "state", "records", "unit-flag.json")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(record, handle)
+        try:
+            response = CLIENT.post(
+                "/v1/quotes/unit-flag/resolve-flag",
+                headers={"Authorization": f"Bearer {token}"},
+                json={"flag_id": "uncapped_local_access", "option": "cap_50000"},
+            )
+            self.assertEqual(response.status_code, 200, response.text)
+            body = response.json()
+            self.assertEqual(body["total_amount"], 50000)
+            self.assertTrue(body["pdf_base64"])
+            scrape = CLIENT.post(
+                "/v1/terminal/scrape",
+                headers={"Authorization": f"Bearer {token}"},
+                json={"terminal": "not-a-terminal", "container": "BAD"},
+            )
+            self.assertEqual(scrape.status_code, 400)
+        finally:
+            if os.path.exists(path):
+                os.remove(path)
 
 
 if __name__ == "__main__":
