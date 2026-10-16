@@ -244,10 +244,15 @@ def format_notice(record: dict[str, Any]) -> str:
     origin = movement["origin"]
     destination = movement["destination"]
     if record.get("agent_ready") is False:
+        heard_charges = []
+        currency = (record.get("commercial") or {}).get("currency") or ""
+        for item in record.get("line_items") or []:
+            heard_charges.append(f"- {item.get('description')}: {currency} {float(item.get('amount') or 0):,.0f}")
         return "\n".join([
             f"{record['business']['legal_name']}",
             "I could not price this message.",
             "I need a route or a vendor, and at least one charge written as NGN 390,000 or USD 5,100.",
+            *(["Charges I read:"] + heard_charges if heard_charges else []),
             *_missing_questions(record),
             "I did not convert, finance, or split it.",
         ] + (

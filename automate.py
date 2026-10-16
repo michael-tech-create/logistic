@@ -495,7 +495,11 @@ def handle_telegram_message(message: dict) -> None:
     record_id = f"tg-{message.get('message_id')}"
     if decision == "ask":
         _save_dialog(chat_id, quote_text)
-        send_telegram(chat_id, _act(chat_id, outcome, decision, held, quote_text))
+        reply = _act(chat_id, outcome, decision, held, quote_text)
+        heard = " ".join(quote_text.split())
+        if heard:
+            reply = f"{reply}\n\nI heard: {heard[:700]}"
+        send_telegram(chat_id, reply[:4000])
         return
     _clear_dialog(chat_id)
     sender = message.get("from") or {}

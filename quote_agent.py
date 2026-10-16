@@ -261,6 +261,23 @@ def _invoice_lines(text: str) -> list[tuple[str, str, float]]:
     return rows
 
 
+def _spoken_route(text: str) -> tuple[str | None, str | None]:
+    """Pull 'from Lagos to Onne' out of a voice transcript."""
+    place = r"[A-Za-z][A-Za-z.'-]*(?:\s+[A-Za-z][A-Za-z.'-]*){0,3}"
+    skip = {"the", "a", "an", "this", "that", "quote", "naira", "dollar", "dollars", "usd", "ngn"}
+    match = re.search(rf"\bfrom\s+({place})\s+to\s+({place})\b", text, re.I)
+    if not match:
+        return None, None
+
+    def clean(value: str) -> str | None:
+        words = [word for word in value.split() if word.casefold() not in skip]
+        if not words:
+            return None
+        return " ".join(word[:1].upper() + word[1:] for word in words)
+
+    return clean(match.group(1)), clean(match.group(2))
+
+
 def _location(label: str) -> Location:
     code_match = re.search(r"\(([A-Z]{5})\)", label)
     code = code_match.group(1) if code_match else None
@@ -309,6 +326,12 @@ def parse_freight_quote(raw_quote_text: str) -> QuoteExtractionResult:
         origin = _location(labeled_origin.group(1))
     if destination.location_name is None and labeled_destination:
         destination = _location(labeled_destination.group(1))
+    if origin.location_name is None or destination.location_name is None:
+        spoken_origin, spoken_destination = _spoken_route(text)
+        if origin.location_name is None and spoken_origin:
+            origin = Location(location_name=spoken_origin)
+        if destination.location_name is None and spoken_destination:
+            destination = Location(location_name=spoken_destination)
     _annotate_place(origin)
     _annotate_place(destination)
     if origin.location_name is None and re.search(r"\bapapa\b", text, re.I):
@@ -378,34 +401,37 @@ def parse_freight_quote(raw_quote_text: str) -> QuoteExtractionResult:
             if "per " not in money_raw.lower():
                 pass
     if not line_items:
+        money_pattern = re.compile(
+            r"(?:₦|NGN|USD|US\$|\$)\s*([\d,]+(?:\.\d{1,2})?)"
+            r"|([\d,]{4,}(?:\.\d{1,2})?)\s*(USD|NGN|₦|\$|naira|dollars?)\b",
+            re.I,
+        )
         for line in text.splitlines():
             cleaned = line.strip().lstrip("-•").strip()
-            money = re.search(r"(?:₦|NGN|USD|US\$|\$)\s*([\d,]+(?:\.\d{1,2})?)", cleaned, re.I)
-            suffix = re.search(r"([\d,]{4,}(?:\.\d{1,2})?)\s*(USD|NGN|₦|\$|naira|dollars?)\b", cleaned, re.I)
-            if money:
-                amount = float(money.group(1).replace(",", ""))
-                code = "USD" if re.search(r"USD|\$", money.group(0), re.I) else "NGN"
-                desc = cleaned[: money.start()].strip(" :-")
-            elif suffix:
-                amount = float(suffix.group(1).replace(",", ""))
-                code = "USD" if re.search(r"USD|\$|dollar", suffix.group(2), re.I) else "NGN"
-                desc = cleaned[: suffix.start()].strip(" :-")
-            else:
-                continue
-            if _optional_accessorial(desc):
-                flags.append(f"Left optional charge '{desc}' out of the all-in total.")
-                continue
-            if len(desc) < 3 or re.search(
-                r"\b(subtotal|grand total|total local|total amount due|customs/tax|official/mid|parallel|platform fee|duty finance)\b",
-                desc,
-                re.I,
-            ):
-                flags.append(f"Skipped rollup '{desc}' so it is not added on top of the detail lines.")
-                continue
-            if currency and code != currency:
-                flags.append(f"Kept {desc} as {code} {amount:,.2f} beside the {currency} lines.")
-            currency = "NGN" if code == "NGN" else (currency or code)
-            line_items.append(LineItem(description=desc, amount=amount, unit=None, category=_categorize(desc)))
+            previous = 0
+            for money in money_pattern.finditer(cleaned):
+                if money.group(1):
+                    amount = float(money.group(1).replace(",", ""))
+                    code = "USD" if re.search(r"USD|\$", money.group(0), re.I) else "NGN"
+                else:
+                    amount = float(money.group(2).replace(",", ""))
+                    code = "USD" if re.search(r"USD|\$|dollar", money.group(3), re.I) else "NGN"
+                desc = cleaned[previous:money.start()].strip(" :-")
+                previous = money.end()
+                if _optional_accessorial(desc):
+                    flags.append(f"Left optional charge '{desc}' out of the all-in total.")
+                    continue
+                if len(desc) < 3 or re.search(
+                    r"\b(subtotal|grand total|total local|total amount due|customs/tax|official/mid|parallel|platform fee|duty finance)\b",
+                    desc,
+                    re.I,
+                ):
+                    flags.append(f"Skipped rollup '{desc}' so it is not added on top of the detail lines.")
+                    continue
+                if currency and code != currency:
+                    flags.append(f"Kept {desc} as {code} {amount:,.2f} beside the {currency} lines.")
+                currency = "NGN" if code == "NGN" else (currency or code)
+                line_items.append(LineItem(description=desc, amount=amount, unit=None, category=_categorize(desc)))
         if line_items:
             flags.append("Read prices from lines that included NGN or USD amounts.")
     if not line_items:
