@@ -52,7 +52,7 @@ from api.store import (
 )
 from customs import to_customs_record
 from market import enrich, load_fx_settings, save_fx_settings
-from quote_agent import parse_quote_smart
+from quote_agent import parse_freight_quote, parse_quote_smart
 
 app = FastAPI(title="Global customs quote API", version="1.0.0")
 app.add_middleware(
@@ -376,6 +376,31 @@ def auth_login(body: LoginBody):
 @app.get("/v1/me")
 def me(authorization: str | None = Header(default=None), x_api_key: str | None = Header(default=None)):
     return public_user(current_user(authorization, x_api_key))
+
+
+_extract_cache: dict[str, dict] = {}
+
+
+class ExtractBody(BaseModel):
+    text: str
+    idempotency_key: str | None = None
+
+
+@app.post("/api/v1/extract")
+def extract_for_bounty(body: ExtractBody, x_api_key: str | None = Header(default=None)):
+    """Internal extract for the bounty agent. Does not use a customer API key or quota."""
+    expected = os.environ.get("QUOTE_INTERNAL_TOKEN", "")
+    if not expected or x_api_key != expected:
+        raise HTTPException(401, "internal token required")
+    if not body.text.strip():
+        raise HTTPException(400, "Quote text is empty.")
+    key = (body.idempotency_key or "").strip()
+    if key and key in _extract_cache:
+        return _extract_cache[key]
+    payload = parse_freight_quote(body.text).model_dump()
+    if key:
+        _extract_cache[key] = payload
+    return payload
 
 
 @app.post("/v1/quotes/parse")
