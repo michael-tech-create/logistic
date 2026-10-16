@@ -133,6 +133,32 @@ def _download_telegram_file(file_id: str) -> bytes:
         return response.read()
 
 
+_AUDIO_SUFFIXES = (".mp3", ".m4a", ".wav", ".ogg", ".opus", ".aac")
+
+
+def _audio_document(message: dict) -> dict | None:
+    """An mp3 sent as a file arrives as a document, not as a voice note."""
+    document = message.get("document") or {}
+    name = (document.get("file_name") or "").lower()
+    mime = (document.get("mime_type") or "").lower()
+    if document and (mime.startswith("audio/") or name.endswith(_AUDIO_SUFFIXES)):
+        return document
+    return None
+
+
+def _transcribe_audio(file_id: str, mime: str, caption: str) -> str:
+    from quote_agent import gemini_media_text
+
+    audio = _download_telegram_file(file_id)
+    transcript = gemini_media_text(
+        audio,
+        mime or "audio/mpeg",
+        "Transcribe this voice note. The speaker may use English or Nigerian Pidgin. "
+        "Return only the words spoken, including every amount, port, and vendor.",
+    )
+    return f"{caption}\n{transcript}".strip()
+
+
 def _media_text(message: dict) -> str:
     """Turn a voice note, photo, or PDF into text. Text messages pass through."""
     from quote_agent import gemini_media_text
@@ -140,14 +166,11 @@ def _media_text(message: dict) -> str:
     caption = message.get("caption") or ""
     voice = message.get("voice") or message.get("audio")
     if voice:
-        audio = _download_telegram_file(voice["file_id"])
-        mime = voice.get("mime_type") or "audio/ogg"
-        transcript = gemini_media_text(
-            audio,
-            mime,
-            "Transcribe this voice note. The speaker may use English or Nigerian Pidgin. Return only the words spoken.",
-        )
-        return f"{caption}\n{transcript}".strip()
+        return _transcribe_audio(voice["file_id"], voice.get("mime_type") or "audio/ogg", caption)
+    audio_file = _audio_document(message)
+    if audio_file:
+        mime = audio_file.get("mime_type") or "audio/mpeg"
+        return _transcribe_audio(audio_file["file_id"], mime, caption)
     photo = message.get("photo") or []
     if photo:
         image = _download_telegram_file(photo[-1]["file_id"])
@@ -417,7 +440,7 @@ def _act(chat_id: str, outcome: dict, decision: str, held: str | None, client_te
         return f"I sent the quote by email to {address}."
     if decision == "ask":
         follow = "" if held else " Reply with the missing piece and I will add it to this quote."
-        return (held or "I still need a few details before I can email this quote.") + follow
+        return ((held or notice) + follow)[:4000]
     return ""
 
 
@@ -435,6 +458,9 @@ def handle_telegram_message(message: dict) -> None:
             text = _media_text(message)
         except Exception as exc:  # noqa: BLE001 — tell the chat instead of dying on one file
             send_telegram(chat_id, f"I could not read that file. {exc}")
+            return
+        if not text.strip():
+            send_telegram(chat_id, "I could not read any words in that file. Send the quote as text or as a voice note.")
             return
     (ROOT / "state" / "last_quote.txt").write_text(text, encoding="utf-8")
     if text.lower().startswith("/link "):
@@ -514,7 +540,7 @@ def poll_telegram_once() -> int:
                 message.get("text") or message.get("caption") or message.get("voice")
                 or message.get("audio") or message.get("photo") or message.get("document")
             ):
-                voice = message.get("voice") or message.get("audio")
+                voice = message.get("voice") or message.get("audio") or _audio_document(message)
                 heavy = message.get("photo") or message.get("document")
                 if voice or not heavy:
                     # Voice has to finish on this loop. A worker Future hides
