@@ -618,7 +618,10 @@ def gemini_media_text(data: bytes, mime: str, instruction: str) -> str:
     if not keys:
         raise RuntimeError("GEMINI_API_KEYS is not set.")
     models = []
-    for name in (os.environ.get("GEMINI_MODEL") or "gemini-flash-lite-latest",):
+    for name in (
+        os.environ.get("GEMINI_MODEL") or "gemini-flash-lite-latest",
+        "gemini-3.5-flash",
+    ):
         if name and name not in models:
             models.append(name)
     encoded = base64.b64encode(data).decode()
@@ -644,7 +647,7 @@ def gemini_media_text(data: bytes, mime: str, instruction: str) -> str:
                 headers={"Content-Type": "application/json", "User-Agent": "logistics-quote-api/1.0"},
             )
             try:
-                with urllib.request.urlopen(request, timeout=18) as response:
+                with urllib.request.urlopen(request, timeout=45) as response:
                     body = json.loads(response.read().decode())
                 parts = (((body.get("candidates") or [{}])[0].get("content") or {}).get("parts") or [])
                 text = "".join(part.get("text") or "" for part in parts).strip()

@@ -24,6 +24,7 @@ import os
 import re
 import smtplib
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from email.message import EmailMessage
@@ -100,14 +101,22 @@ def telegram_api(method: str, payload: dict | None = None) -> dict:
         data=data,
         headers={"Content-Type": "application/json"},
     )
-    with urllib.request.urlopen(request, timeout=70) as response:
-        body = json.loads(response.read().decode())
+    try:
+        with urllib.request.urlopen(request, timeout=70) as response:
+            raw = response.read().decode()
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")[:500]
+        raise RuntimeError(f"Telegram {method} HTTP {exc.code}: {detail}") from exc
+    body = json.loads(raw)
     if not body.get("ok"):
         raise RuntimeError(body.get("description") or "Telegram API error")
     return body
 
 
 def send_telegram(chat_id: str, text: str, markup: dict | None = None) -> None:
+    text = (text or "").strip()
+    if not text:
+        raise RuntimeError("Telegram sendMessage refused an empty message.")
     payload = {"chat_id": chat_id, "text": text[:4000]}
     if markup:
         payload["reply_markup"] = markup
@@ -505,13 +514,23 @@ def poll_telegram_once() -> int:
                 message.get("text") or message.get("caption") or message.get("voice")
                 or message.get("audio") or message.get("photo") or message.get("document")
             ):
-                heavy = message.get("voice") or message.get("audio") or message.get("photo") or message.get("document")
-                if heavy:
+                voice = message.get("voice") or message.get("audio")
+                heavy = message.get("photo") or message.get("document")
+                if voice or not heavy:
+                    # Voice has to finish on this loop. A worker Future hides
+                    # Gemini 503s, so the chat never gets a reply.
+                    handle_telegram_message(message)
+                else:
                     from workers import submit
 
-                    submit(handle_telegram_message, message)
-                else:
-                    handle_telegram_message(message)
+                    job = submit(handle_telegram_message, message)
+
+                    def _log_worker(done, _job=job) -> None:
+                        err = _job.exception()
+                        if err:
+                            print(f"[intake] background update failed: {err}")
+
+                    job.add_done_callback(_log_worker)
                 handled += 1
         except Exception as exc:  # noqa: BLE001 — advance past a message that already failed once
             print(f"[intake] update skipped: {exc}")
