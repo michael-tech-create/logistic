@@ -189,25 +189,16 @@ def _cap_local_access(record: dict) -> bool:
 
 
 def _split_gate_in(record: dict) -> bool:
-    """Turn a 70% gate-in cash call into 50% of the same base."""
-    changed = False
-    for item in _lines(record):
-        label = str(item.get("description") or "")
-        if re.search(r"gate[\s-]?in", label, re.I):
-            amount = float(item.get("amount") or 0)
-            if amount:
-                item["amount"] = round(amount / 0.70 * 0.50, 2)
-                item["payment_split"] = "50/50"
-                changed = True
-    if not changed:
-        record.setdefault("commercial", {})["payment_terms"] = "50/50 gate-in split"
-    return changed
+    """An installment change does not change the invoice's charge amounts."""
+    record.setdefault("commercial", {})["payment_terms"] = "Proposed 50/50 gate-in split; carrier confirmation required"
+    return False
 
 
 def resolve_flag(record: dict, flag_id: str, option: str, actor: str = "desk") -> dict:
     spec = FLAG_CATALOG.get(flag_id)
     if spec is None or option not in spec["options"]:
         raise ValueError(f"Unknown flag action {flag_id}:{option}")
+    record.pop("desk_review", None)
     numerical = False
     note = spec["options"][option]
     if flag_id == "validity_48h" and option == "extend_72h":
@@ -220,13 +211,15 @@ def resolve_flag(record: dict, flag_id: str, option: str, actor: str = "desk") -
         record.setdefault("commercial", {})["local_access"] = "pass-through"
     elif flag_id == "gate_in_70" and option == "split_50_50":
         numerical = _split_gate_in(record)
-        note = "Gate-in renegotiated from 70% to a 50/50 split"
+        note = "Proposed 50/50 gate-in split recorded; confirm with the carrier"
     elif option in {"acknowledge_risk", "accept_terms"}:
         note = spec["options"][option]
 
     ngn = None
     if numerical:
         ngn = _set_ngn_total(record, _sum_lines(record))
+        from market import enrich
+        enrich(record, record.get("business"))
     record.setdefault("flag_resolutions", []).append({
         "flag_id": flag_id,
         "option": option,
@@ -388,7 +381,7 @@ def lane_benchmark(lane: str, equipment: str = "40ft") -> dict:
 def matrix_files(matrix: dict, business_name: str) -> tuple[bytes, bytes]:
     from io import BytesIO
 
-    from fpdf import FPDF
+    from api.exports import new_pdf
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill
 
@@ -412,11 +405,11 @@ def matrix_files(matrix: dict, business_name: str) -> tuple[bytes, bytes]:
     buffer = BytesIO()
     book.save(buffer)
 
-    pdf = FPDF()
+    pdf = new_pdf()
     pdf.add_page()
-    pdf.set_font("Helvetica", "B", 14)
+    pdf.set_font("Desk", "B", 14)
     pdf.cell(0, 10, f"{business_name} quote matrix", new_x="LMARGIN", new_y="NEXT")
-    pdf.set_font("Helvetica", "", 10)
+    pdf.set_font("Desk", "", 10)
     pdf.cell(0, 8, f"Lane: {matrix['lane']}", new_x="LMARGIN", new_y="NEXT")
     for column in matrix["columns"]:
         pdf.multi_cell(

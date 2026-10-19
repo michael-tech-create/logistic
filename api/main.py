@@ -11,6 +11,7 @@ import os
 import re
 import secrets
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -18,6 +19,7 @@ from fastapi import BackgroundTasks, FastAPI, File, Header, HTTPException, Reque
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from pydantic import BaseModel
+from starlette.concurrency import run_in_threadpool
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -142,12 +144,16 @@ def _business(user: dict) -> dict:
 
 def enforce_plan_quota(user: dict, count: int = 1) -> None:
     """Reject the request before a parse when the account is over its monthly cap."""
-    from api.store import connect
+    from api.store import connect, using_cloud
 
-    row = connect().execute(
-        "SELECT quota_remaining, plan_code, plan_parses FROM users WHERE id = ?",
-        (user["id"],),
-    ).fetchone()
+    if using_cloud():
+        row = user
+    else:
+        with connect() as conn:
+            row = conn.execute(
+                "SELECT quota_remaining, plan_code, plan_parses FROM users WHERE id = ?",
+                (user["id"],),
+            ).fetchone()
     remaining = int(row["quota_remaining"] or 0) if row else 0
     cap = int(row["plan_parses"] or 0) if row else 0
     if remaining < count:
@@ -305,6 +311,33 @@ def _company_id(record: dict) -> str | None:
     return record.get("company_id") or (record.get("business") or {}).get("id")
 
 
+def _owned_quote(user: dict, record_id: str) -> dict:
+    from api.store import using_cloud
+    from desk_ops import load_record
+    from supabase_sync import get_quote
+
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", record_id):
+        raise HTTPException(404, "Quote not found.")
+    company_id = ensure_company(user)["code"]
+    record = get_quote(record_id, company_id) if using_cloud() else load_record(record_id)
+    if record is None or _company_id(record) != company_id:
+        raise HTTPException(404, "Quote not found.")
+    return {**record, "record_id": record_id}
+
+
+def _save_desk_quote(record: dict, user: dict, *, source_text: str | None = None) -> dict:
+    from desk_ops import save_record
+
+    record.setdefault("record_id", "desk-" + secrets.token_hex(12))
+    record["company_id"] = ensure_company(user)["code"]
+    if source_text is not None:
+        record["source_text"] = source_text
+    save_record(record["record_id"], record)
+    if record.get("sync_error"):
+        raise HTTPException(503, "The quote could not be synced. Please try again when storage is available.")
+    return record
+
+
 @app.get("/v1/inbox")
 def inbox(authorization: str | None = Header(default=None), x_api_key: str | None = Header(default=None)):
     """Quotes for the signed-in company only, newest first."""
@@ -408,7 +441,7 @@ def parse_quote(body: ParseBody, authorization: str | None = Header(default=None
     user = current_user(authorization, x_api_key)
     if not body.text.strip():
         raise HTTPException(400, "Quote text is empty.")
-    return _parse_for_user(user, body.text)
+    return _save_desk_quote(_parse_for_user(user, body.text), user, source_text=body.text)
 
 
 @app.post("/v1/quotes/batch")
@@ -421,23 +454,32 @@ async def parse_batch(
     if not files:
         raise HTTPException(400, "Upload at least one .pdf or .txt quote.")
     enforce_plan_quota(user, len(files))
-    records = []
+    sources = []
     for upload in files:
-        raw = await upload.read()
+        raw = await upload.read(10 * 1024 * 1024 + 1)
         name = (upload.filename or "quote").lower()
+        if not name.endswith((".pdf", ".txt")):
+            raise HTTPException(400, f"{upload.filename}: choose a PDF or TXT file.")
+        if len(raw) > 10 * 1024 * 1024:
+            raise HTTPException(400, f"{upload.filename}: the maximum file size is 10 MB.")
         if name.endswith(".pdf"):
-            from workers import submit
-
-            text = submit(pdf_to_text, raw).result()
+            try:
+                text = await run_in_threadpool(pdf_to_text, raw)
+            except Exception as exc:
+                raise HTTPException(400, f"{upload.filename}: this PDF could not be read. Upload a readable PDF or paste its quote text.") from exc
         else:
             text = raw.decode("utf-8", errors="replace")
         if not text.strip():
-            raise HTTPException(400, f"No text found in {upload.filename}.")
-        record = _parse_for_user(user, text)
-        record["source_file"] = upload.filename
+            raise HTTPException(400, f"No text found in {upload.filename}. For a scanned PDF, use Telegram photo intake or paste its text.")
+        sources.append((upload.filename, text))
+    records = []
+    for filename, text in sources:
+        record = await run_in_threadpool(_parse_for_user, user, text)
+        record["source_file"] = filename
+        await run_in_threadpool(_save_desk_quote, record, user, source_text=text)
         records.append(record)
     batch_id = secrets.token_urlsafe(12)
-    save_batch(user["id"], batch_id, json.dumps(records))
+    await run_in_threadpool(save_batch, user["id"], batch_id, json.dumps(records))
     return {"batch_id": batch_id, "count": len(records), "records": records}
 
 
@@ -446,6 +488,7 @@ def _batch(authorization: str | None, x_api_key: str | None, batch_id: str) -> t
     records = load_batch(user["id"], batch_id)
     if records is None:
         raise HTTPException(404, "Batch not found.")
+    records = [_owned_quote(user, record["record_id"]) if record.get("record_id") else record for record in records]
     return user, records
 
 
@@ -465,6 +508,43 @@ def download_pdf(batch_id: str, authorization: str | None = Header(default=None)
     user, records = _batch(authorization, x_api_key, batch_id)
     data = build_pdf(records, user["business_name"])
     return Response(data, media_type="application/pdf", headers={"Content-Disposition": 'attachment; filename="quotes.pdf"'})
+
+
+@app.get("/v1/quotes/batch/{batch_id}")
+def batch_details(batch_id: str, authorization: str | None = Header(default=None), x_api_key: str | None = Header(default=None)):
+    _, records = _batch(authorization, x_api_key, batch_id)
+    return {"batch_id": batch_id, "records": records}
+
+
+@app.post("/v1/quotes/{record_id}/review")
+def review_quote(record_id: str, authorization: str | None = Header(default=None), x_api_key: str | None = Header(default=None)):
+    user = current_user(authorization, x_api_key)
+    record = _owned_quote(user, record_id)
+    movement = record.get("movement") or {}
+    commercial = record.get("commercial") or {}
+    missing = []
+    for field in ("origin", "destination"):
+        if not (movement.get(field) or {}).get("location_name"):
+            missing.append(field)
+    if not record.get("line_items") or not commercial.get("currency") or float(commercial.get("total_amount") or 0) <= 0:
+        missing.append("priced charges")
+    if missing:
+        raise HTTPException(400, "Add " + ", ".join(missing) + " before marking this quote checked. Correct the source and parse it again.")
+    record["desk_review"] = {"status": "reviewed", "reviewed_at": datetime.now(timezone.utc).isoformat(), "reviewed_by": user["email"]}
+    return _save_desk_quote(record, user)
+
+
+@app.get("/v1/quotes/{record_id}/export/{kind}")
+def export_quote(record_id: str, kind: str, authorization: str | None = Header(default=None), x_api_key: str | None = Header(default=None)):
+    user = current_user(authorization, x_api_key)
+    record = _owned_quote(user, record_id)
+    if kind == "pdf":
+        data, media = build_pdf([record], user["business_name"]), "application/pdf"
+    elif kind == "xlsx":
+        data, media = build_xlsx([record], user["business_name"]), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    else:
+        raise HTTPException(400, "Choose pdf or xlsx.")
+    return Response(data, media_type=media, headers={"Content-Disposition": f'attachment; filename="{record_id}.{kind}"'})
 
 
 def _callback_url(requested: str | None) -> str:
@@ -536,6 +616,12 @@ def _alert_telegram(text: str, chat_id: str | None) -> None:
             headers={"Content-Type": "application/json"},
         )
         urllib.request.urlopen(request, timeout=20).read()
+    try:
+        from notify_bounty import notify_bounty
+
+        notify_bounty("quote_ready")
+    except Exception:
+        pass
 
 
 class ReviewBody(BaseModel):
@@ -560,6 +646,8 @@ def review_decision(review_id: int, body: ReviewBody, authorization: str | None 
     current = get_review(review_id, company_id)
     if current is None:
         raise HTTPException(404, "Review not found.")
+    if current.get("status") != "pending":
+        raise HTTPException(409, "This review has already been handled. Refresh the approvals list.")
     if body.status == "approved" and current.get("kind") in {"pay", "clear"}:
         result = execute_approved(current)
         status = "executed" if result["done"] else "pending"
@@ -594,25 +682,21 @@ def resolve_quote_flag(
     x_api_key: str | None = Header(default=None),
 ):
     user = current_user(authorization, x_api_key)
-    from desk_ops import FlagResolution, load_record, resolve_flag, save_record
+    from desk_ops import FlagResolution, resolve_flag
 
-    record = load_record(record_id)
-    company = ensure_company(user)["code"]
-    owner = record.get("company_id") if record else None
-    if record is None or (owner and owner != company):
-        raise HTTPException(404, "Quote not found.")
+    record = _owned_quote(user, record_id)
     try:
         action = FlagResolution.model_validate(body)
         result = resolve_flag(record, action.flag_id, action.option, action.actor)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
-    save_record(record_id, record)
+    _save_desk_quote(record, user)
     pdf = None
     if result["recalculated"]:
         import base64
 
         pdf = base64.b64encode(build_pdf([record], user["business_name"])).decode()
-    return {**result, "record_id": record_id, "pdf_base64": pdf, "total_amount": (record.get("commercial") or {}).get("total_amount")}
+    return {**result, "record_id": record_id, "record": record, "pdf_base64": pdf, "total_amount": (record.get("commercial") or {}).get("total_amount")}
 
 
 @app.post("/v1/terminal/scrape")
@@ -706,24 +790,26 @@ def terminal_status(body: TerminalStatus, x_terminal_token: str | None = Header(
 
 
 def _run_telegram_update(update: dict) -> None:
-    from automate import handle_telegram_message, _handle_callback
-
-    callback = update.get("callback_query")
-    if callback:
-        _handle_callback(callback)
-        return
-    message = update.get("message") or update.get("channel_post") or {}
-    if message.get("text") or message.get("caption") or message.get("voice") or message.get("audio") or message.get("photo") or message.get("document"):
-        handle_telegram_message(message)
+    from telegram_jobs import schedule_pending
+    schedule_pending()
 
 
 @app.post("/telegram/webhook")
 async def telegram_webhook(request: Request, background: BackgroundTasks):
     """Acknowledge Telegram immediately. Transcription and PDF reading run after the 200."""
+    if os.environ.get("TELEGRAM_DELIVERY_MODE", "polling").lower() != "webhook":
+        raise HTTPException(409, "Webhook intake is disabled. Set TELEGRAM_DELIVERY_MODE=webhook to use it.")
     expected = os.environ.get("TELEGRAM_WEBHOOK_SECRET")
-    if expected and request.headers.get("x-telegram-bot-api-secret-token") != expected:
+    if not expected:
+        raise HTTPException(503, "Configure TELEGRAM_WEBHOOK_SECRET before enabling webhook intake.")
+    if not secrets.compare_digest(request.headers.get("x-telegram-bot-api-secret-token", "").encode(), expected.encode()):
         raise HTTPException(401, "Invalid Telegram secret.")
-    update = await request.json()
+    from telegram_jobs import enqueue
+    try:
+        update = await request.json()
+        enqueue(update)
+    except (ValueError, AttributeError, TypeError) as exc:
+        raise HTTPException(400, "Invalid Telegram update.") from exc
     background.add_task(_run_telegram_update, update)
     return {"ok": True}
 

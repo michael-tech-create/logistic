@@ -103,6 +103,11 @@ def user_by_api_key(api_key: str | None) -> dict | None:
     return _one(f"users?api_key=eq.{urllib_quote(api_key)}&select=*")
 
 
+def user_by_company(code: str) -> dict | None:
+    company = _one(f"companies?code=eq.{urllib_quote(code)}&select=user_id")
+    return _one(f"users?id=eq.{company['user_id']}&select=*") if company else None
+
+
 def consume(user_id: int, count: int = 1) -> dict:
     row = _one(f"users?id=eq.{user_id}&select=*")
     if row is None:
@@ -178,12 +183,25 @@ def link_telegram(code: str, chat_id: str) -> dict | None:
     row = _one(f"companies?code=eq.{urllib_quote(code.strip())}&select=*")
     if row is None:
         return None
+    for other in company_businesses():
+        if other["id"] != code.strip() and str(chat_id) in other["telegram_chat_ids"]:
+            raise ValueError("This chat is already linked to another company. Use /unlink before changing companies.")
     chats = _list(row.get("telegram_chat_ids"))
     if str(chat_id) not in chats:
         chats.append(str(chat_id))
-    updated = _patch(f"companies?id=eq.{row['id']}", {"telegram_chat_ids": chats}) or row
+    updated = _patch(f"companies?id=eq.{row['id']}", {"telegram_chat_ids": chats})
+    if updated is None:
+        raise ValueError("The company link could not be saved. Try /link again.")
     updated["telegram_chat_ids"] = chats
     return updated
+
+
+def unlink_telegram(chat_id: str) -> None:
+    rows = _request("GET", "companies?select=id,telegram_chat_ids", None)
+    for row in rows if isinstance(rows, list) else []:
+        chats = _list(row.get("telegram_chat_ids"))
+        if str(chat_id) in chats:
+            _patch(f"companies?id=eq.{row['id']}", {"telegram_chat_ids": [item for item in chats if item != str(chat_id)]})
 
 
 def company_businesses() -> list[dict]:

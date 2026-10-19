@@ -1,478 +1,163 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import {
-  Alert,
-  AppBar,
-  Box,
-  Button,
-  Card,
-  CardContent,
-  Chip,
-  Container,
-  Paper,
-  Stack,
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableRow,
-  TextField,
-  Toolbar,
-  Typography,
-} from "@mui/material";
-import Grid from "@mui/material/Grid";
-import UploadFileIcon from "@mui/icons-material/UploadFile";
-import PaymentsIcon from "@mui/icons-material/Payments";
-import { BarChart } from "@mui/x-charts/BarChart";
-import { PieChart } from "@mui/x-charts/PieChart";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { Alert, Avatar, Box, Button, Chip, CircularProgress, Container, Dialog, DialogActions, DialogContent, DialogTitle, IconButton, LinearProgress, Paper, Skeleton, Stack, Typography } from "@mui/material";
+import { Add, ArrowForward, DescriptionOutlined, DownloadOutlined, FactCheckOutlined, HubOutlined, LocalShippingOutlined, Logout, SettingsOutlined } from "@mui/icons-material";
+import Auth from "./Auth";
+import IntakeDialog from "./IntakeDialog";
+import QuoteDialog from "./QuoteDialog";
+import QuoteInbox from "./QuoteInbox";
+import { Approvals, Connections, panel, Settings } from "./WorkspacePanels";
+import { filterRecords, mergeRecords, money, request, saveDownload, statusOf } from "./workflow.mjs";
 
-const API = process.env.NEXT_PUBLIC_API_URL || "";
+const navigation = [
+  { id: "quotes", label: "Quotes", icon: DescriptionOutlined },
+  { id: "approvals", label: "Approvals", icon: FactCheckOutlined },
+  { id: "connections", label: "Connections", icon: HubOutlined },
+  { id: "settings", label: "Settings", icon: SettingsOutlined },
+];
+const headings = {
+  quotes: ["Your quote desk", "Bring in a quote, check the details, and prepare a client file."],
+  approvals: ["Approvals", "Review requests before authorizing payment or cargo clearance."],
+  connections: ["Bring your channels together", "Send quotes from the places your team already works."],
+  settings: ["Workspace settings", "Manage your rates, port risk, and parse allowance."],
+};
 
-const money = (currency, amount) => `${currency || ""} ${Number(amount || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-
-export default function HomePage() {
-  const [token, setToken] = useState("");
-  const [me, setMe] = useState(null);
-  const [mode, setMode] = useState("login");
-  const [form, setForm] = useState({ email: "", password: "", business_name: "", home_country: "Nigeria" });
-  const [error, setError] = useState("");
-  const [records, setRecords] = useState([]);
-  const [live, setLive] = useState([]);
-  const [batchId, setBatchId] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [chosen, setChosen] = useState([]);
-  const [parallelRate, setParallelRate] = useState("");
-  const [cbnRate, setCbnRate] = useState("");
-  const [fallbackOfficial, setFallbackOfficial] = useState("1550");
-  const [fallbackParallel, setFallbackParallel] = useState("1650");
+function Workspace({ token, initialUser, onSignOut }) {
+  const [me, setMe] = useState(initialUser);
+  const [section, setSection] = useState("quotes");
+  const [inbox, setInbox] = useState(null);
+  const [reviews, setReviews] = useState(null);
   const [company, setCompany] = useState(null);
-  const [deskNote, setDeskNote] = useState("");
-  const [reviews, setReviews] = useState([]);
+  const [rates, setRates] = useState(null);
+  const [pack, setPack] = useState({ batch_id: "", records: [] });
+  const [selected, setSelected] = useState(null);
+  const [intake, setIntake] = useState(false);
+  const [seed, setSeed] = useState("");
+  const [search, setSearch] = useState("");
+  const [filter, setFilter] = useState("all");
+  const [notice, setNotice] = useState("");
+  const [error, setError] = useState("");
+  const [inboxError, setInboxError] = useState("");
+  const [reviewsError, setReviewsError] = useState("");
+  const [setupError, setSetupError] = useState("");
+  const [updatedAt, setUpdatedAt] = useState("");
+  const [busy, setBusy] = useState("");
+  const [confirmation, setConfirmation] = useState(null);
 
-  useEffect(() => {
-    const saved = window.localStorage.getItem("quote_token");
-    if (saved) setToken(saved);
-  }, []);
-
-  useEffect(() => {
-    if (!token) return;
-    fetch(`${API}/v1/me`, { headers: { Authorization: `Bearer ${token}` } })
-      .then(async (response) => {
-        if (!response.ok) throw new Error("Session expired");
-        setMe(await response.json());
-      })
-      .catch(() => {
-        setToken("");
-        window.localStorage.removeItem("quote_token");
-      });
+  function navigate(id) { setSection(id); window.location.hash = id; setError(""); setNotice(""); }
+  const refresh = useCallback(async (isActive = () => true) => {
+    const results = await Promise.allSettled([request(token, "/v1/inbox"), request(token, "/v1/reviews")]);
+    if (!isActive()) return;
+    if (results[0].status === "fulfilled") { setInbox(results[0].value.records || []); setInboxError(""); setUpdatedAt(new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })); }
+    else setInboxError(results[0].reason.message);
+    if (results[1].status === "fulfilled") { setReviews(results[1].value.reviews || []); setReviewsError(""); }
+    else setReviewsError(results[1].reason.message);
   }, [token]);
-
+  const loadSetup = useCallback(async (isActive = () => true) => {
+    const results = await Promise.allSettled([request(token, "/v1/company"), request(token, "/v1/rates")]);
+    if (!isActive()) return;
+    let problem = "";
+    if (results[0].status === "fulfilled") setCompany(results[0].value); else problem = results[0].reason.message;
+    if (results[1].status === "fulfilled") setRates(results[1].value); else problem = results[1].reason.message;
+    setSetupError(problem);
+  }, [token]);
   useEffect(() => {
-    if (!token || !me) return undefined;
-    let stop = false;
-    const pull = () => {
-      fetch(`${API}/v1/inbox`, { headers: { Authorization: `Bearer ${token}` } })
-        .then((response) => (response.ok ? response.json() : { records: [] }))
-        .then((payload) => {
-          if (!stop) setLive(payload.records || []);
-        })
-        .catch(() => {});
-    };
-    pull();
-    fetch(`${API}/v1/company`, { headers: { Authorization: `Bearer ${token}` } })
-      .then((response) => (response.ok ? response.json() : null))
-      .then((payload) => { if (!stop && payload) setCompany(payload); })
-      .catch(() => {});
-    const timer = setInterval(pull, 8000);
-    return () => {
-      stop = true;
-      clearInterval(timer);
-    };
-  }, [token, me]);
+    let active = true;
+    let pulling = false;
+    const poll = async () => { if (pulling) return; pulling = true; try { await refresh(() => active); } finally { pulling = false; } };
+    poll(); loadSetup(() => active);
+    const onHash = () => { const id = window.location.hash.slice(1); if (navigation.some((item) => item.id === id)) setSection(id); };
+    onHash(); window.addEventListener("hashchange", onHash);
+    const timer = setInterval(poll, 15000);
+    const batchId = window.localStorage.getItem(`quote_pack_${initialUser.id}`);
+    if (batchId) request(token, `/v1/quotes/batch/${encodeURIComponent(batchId)}`).then((payload) => { if (active) setPack(payload); }).catch((err) => { if (active) { setNotice(`Your last client pack could not be opened. ${err.message}`); if (err.status === 404) window.localStorage.removeItem(`quote_pack_${initialUser.id}`); } });
+    return () => { active = false; clearInterval(timer); window.removeEventListener("hashchange", onHash); };
+  }, [refresh, loadSetup, token, initialUser.id]);
 
-  const shown = useMemo(() => {
-    const seen = new Set();
-    const rows = [];
-    [...live, ...records].forEach((record, index) => {
-      const reference = record.commercial?.quote_reference_id || record.source_file || `row-${index}`;
-      if (seen.has(reference)) return;
-      seen.add(reference);
-      rows.push(record);
-    });
-    return rows;
-  }, [live, records]);
-
-  const charts = useMemo(() => {
-    const categories = {};
-    const lanes = {};
-    let customs = 0;
-    let quoted = 0;
-    for (const record of shown) {
-      const lane = record.lane || "unknown";
-      lanes[lane] = (lanes[lane] || 0) + 1;
-      quoted += Number(record.commercial?.total_amount || 0);
-      customs += Number(record.commercial?.customs_and_tax || 0);
-      for (const item of record.line_items || []) {
-        categories[item.category] = (categories[item.category] || 0) + Number(item.amount || 0);
-      }
-    }
-    return {
-      categories: Object.keys(categories),
-      amounts: Object.values(categories),
-      lanes: Object.entries(lanes).map(([label, value], id) => ({ id, label, value })),
-      customs,
-      quoted,
-    };
-  }, [shown]);
-
-  async function submitAuth(event) {
-    event.preventDefault();
-    setError("");
-    const path = mode === "login" ? "/v1/auth/login" : "/v1/auth/register";
-    const response = await fetch(`${API}${path}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(form),
-    });
-    const payload = await response.json();
-    if (!response.ok) {
-      setError(typeof payload.detail === "string" ? payload.detail : "Could not sign in");
-      return;
-    }
-    window.localStorage.setItem("quote_token", payload.token);
-    setToken(payload.token);
-    setMe(payload);
+  const shown = useMemo(() => mergeRecords(inbox || [], pack.records), [inbox, pack.records]);
+  const visible = useMemo(() => filterRecords(shown, search, filter), [shown, search, filter]);
+  const checked = shown.filter((record) => statusOf(record).key === "reviewed").length;
+  const pending = (reviews || []).filter((row) => row.status === "pending");
+  const packRecords = pack.records.map((record) => shown.find((item) => item.record_id === record.record_id) || record);
+  const packUnchecked = packRecords.filter((record) => statusOf(record).key !== "reviewed");
+  async function perform(action, callback) {
+    setBusy(action); setError(""); setNotice("");
+    try { await callback(); } catch (err) { setError(err.message); } finally { setBusy(""); }
   }
-
-  async function upload(event) {
-    event.preventDefault();
-    const files = event.target.elements.quotes.files;
-    if (!files?.length) return;
-    setBusy(true);
-    setError("");
-    const body = new FormData();
-    for (const file of files) body.append("files", file);
-    const response = await fetch(`${API}/v1/quotes/batch`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${token}` },
-      body,
-    });
-    const payload = await response.json();
-    setBusy(false);
-    if (!response.ok) {
-      setError(typeof payload.detail === "string" ? payload.detail : "Upload failed");
-      return;
-    }
-    setRecords(payload.records);
-    setBatchId(payload.batch_id);
-    const profile = await fetch(`${API}/v1/me`, { headers: { Authorization: `Bearer ${token}` } });
-    setMe(await profile.json());
+  function addQuote(text = "") { setSeed(text); setIntake(true); }
+  function onCreated(payload) {
+    const records = payload.records || [];
+    setInbox((current) => mergeRecords(records, current || []));
+    if (payload.batch_id) { setPack(payload); window.localStorage.setItem(`quote_pack_${me.id}`, payload.batch_id); }
+    setIntake(false); setSelected(records[0] || null); setSection("quotes"); window.location.hash = "quotes";
+    setNotice(`${records.length === 1 ? "Quote added" : `${records.length} quotes added`}. Check the details before exporting.`);
+    request(token, "/v1/me").then(setMe).catch((err) => setError(err.message));
   }
-
-  async function postDesk(path, body) {
-    setDeskNote("");
-    const response = await fetch(`${API}${path}`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    const payload = await response.json();
-    setDeskNote(payload.note || payload.detail || payload.level || (response.ok ? "Saved" : "Request failed"));
+  function updateRecord(record) {
+    setInbox((current) => (current || []).map((item) => item.record_id === record.record_id ? record : item));
+    setPack((current) => ({ ...current, records: current.records.map((item) => item.record_id === record.record_id ? record : item) }));
+    setSelected(record);
   }
-
-  async function loadReviews() {
-    const response = await fetch(`${API}/v1/reviews`, { headers: { Authorization: `Bearer ${token}` } });
-    const payload = await response.json();
-    const rows = payload.reviews || [];
-    setReviews(rows);
-    const pending = rows.filter((row) => row.status === "pending");
-    setDeskNote(pending.length ? pending.map((row) => `#${row.id} ${row.kind}: ${row.summary}`).join(" · ") : "No human reviews are waiting.");
+  function confirmDelete(record) {
+    setConfirmation({ title: "Delete this quote?", description: `${record.commercial?.vendor_name || "This quote"} will be removed from your inbox. If it belongs to the current client pack, that pack will be closed. This cannot be undone.`, label: "Delete quote", danger: true, action: async () => {
+      await request(token, `/v1/inbox/${record.record_id}`, { method: "DELETE" });
+      setInbox((current) => (current || []).filter((item) => item.record_id !== record.record_id));
+      if (pack.records.some((item) => item.record_id === record.record_id)) { setPack({ batch_id: "", records: [] }); window.localStorage.removeItem(`quote_pack_${me.id}`); }
+      setSelected(null); setNotice("Quote deleted.");
+    } });
   }
-
-  async function decideReview(id, status) {
-    const response = await fetch(`${API}/v1/reviews/${id}`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ status }),
-    });
-    const payload = await response.json();
-    setDeskNote(payload.execution?.note || payload.execution_note || payload.detail || payload.status || "Review updated");
-    await loadReviews();
+  function exportPack(kind) {
+    perform(`export-${kind}`, async () => { const blob = await request(token, `/v1/quotes/batch/${pack.batch_id}.${kind}`, { download: true }); saveDownload(blob, `client-quotes.${kind}`); setNotice(`${kind.toUpperCase()} pack download started.`); });
   }
+  const navButtons = () => navigation.map((item) => { const Icon = item.icon; return <Button key={item.id} onClick={() => navigate(item.id)} aria-current={section === item.id ? "page" : undefined} startIcon={<Icon fontSize="small" />} sx={{ justifyContent: "flex-start", px: 2, color: section === item.id ? "primary.main" : "text.secondary", bgcolor: section === item.id ? "#e9f0e8" : "transparent", fontWeight: section === item.id ? 700 : 500, whiteSpace: "nowrap" }}>{item.label}{item.id === "approvals" && !!pending.length && <Chip label={pending.length} size="small" sx={{ ml: 1, height: 20, minWidth: 24, bgcolor: "#e8dccc", color: "#744717" }} />}</Button>; });
 
-  async function removeQuote(recordId) {
-    setError("");
-    const response = await fetch(`${API}/v1/inbox/${recordId}`, {
-      method: "DELETE",
-      headers: { Authorization: `Bearer ${token}` },
-    });
-    const payload = await response.json();
-    if (!response.ok) {
-      setError(typeof payload.detail === "string" ? payload.detail : "Could not delete the quote");
-      return;
-    }
-    setLive((current) => current.filter((record) => record.record_id !== recordId));
-  }
-
-  async function saveRates() {
-    setError("");
-    const body = {};
-    if (parallelRate) body.parallel_usd_ngn = Number(parallelRate);
-    if (cbnRate) body.cbn_usd_ngn = Number(cbnRate);
-    if (fallbackOfficial) body.fallback_official_usd_ngn = Number(fallbackOfficial);
-    if (fallbackParallel) body.fallback_parallel_usd_ngn = Number(fallbackParallel);
-    const response = await fetch(`${API}/v1/rates`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    const payload = await response.json();
-    if (!response.ok) {
-      setError(typeof payload.detail === "string" ? payload.detail : "Could not save rates");
-    }
-  }
-
-  async function pay(plan) {
-    setError("");
-    const response = await fetch(`${API}/v1/billing/checkout`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ callback_url: `${window.location.origin}/billing`, plan }),
-    });
-    const payload = await response.json();
-    if (!response.ok) {
-      setError(typeof payload.detail === "string" ? payload.detail : "Paystack is not configured");
-      return;
-    }
-    window.location.href = payload.authorization_url;
-  }
-
-  async function download(kind) {
-    const response = await fetch(`${API}/v1/quotes/batch/${batchId}.${kind}`, {
-      headers: { Authorization: `Bearer ${token}` },
-    });
-    if (!response.ok) {
-      setError("Download failed");
-      return;
-    }
-    const blob = await response.blob();
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = kind === "xlsx" ? "client-quotes.xlsx" : "client-quotes.pdf";
-    link.click();
-    URL.revokeObjectURL(url);
-  }
-
-  const quotaMax = Math.max(me?.plan_parses || 1000, me?.quota_remaining || 0, 1);
-
-  return (
-    <Box sx={{ minHeight: "100vh", bgcolor: "background.default" }}>
-      <AppBar position="static" elevation={0}>
-        <Toolbar>
-          <Typography sx={{ flexGrow: 1, letterSpacing: "0.08em", fontWeight: 700 }}>CLEARING DESK</Typography>
-          {me ? <Chip label={me.business_name} sx={{ bgcolor: "rgba(255,255,255,0.16)", color: "white" }} /> : null}
-        </Toolbar>
-      </AppBar>
-      <Container maxWidth="lg" sx={{ py: 4 }}>
-        {error ? <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert> : null}
-        {!me ? (
-          <Paper sx={{ p: 4, maxWidth: 480, mx: "auto" }}>
-            <Typography variant="h4" gutterBottom>{mode === "login" ? "Agent sign in" : "Open a desk"}</Typography>
-            <Stack component="form" spacing={2} onSubmit={submitAuth}>
-              {mode === "register" ? (
-                <>
-                  <TextField label="Business name" required value={form.business_name} onChange={(e) => setForm({ ...form, business_name: e.target.value })} />
-                  <TextField label="Home country" value={form.home_country} onChange={(e) => setForm({ ...form, home_country: e.target.value })} />
-                </>
-              ) : null}
-              <TextField label="Email" type="email" required value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} />
-              <TextField label="Password" type="password" required value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} />
-              <Button type="submit" variant="contained">{mode === "login" ? "Sign in" : "Create desk"}</Button>
-              <Button type="button" onClick={() => setMode(mode === "login" ? "register" : "login")}>
-                {mode === "login" ? "Need an account" : "I already have an account"}
-              </Button>
-            </Stack>
-          </Paper>
-        ) : (
-          <Stack spacing={3}>
-            {company ? (
-              <Paper sx={{ p: 2 }}>
-                <Typography variant="h6">Company tools</Typography>
-                <Typography variant="body2">Telegram link code: {company.link_command}</Typography>
-                <Typography variant="body2" sx={{ mb: 1 }}>Port risk is {company.port_risk}. Pay and clear wait for a person. Approve sends the stored quote to the payout or customs rail. If that rail is not configured, nothing is marked paid or cleared.</Typography>
-                <Stack direction={{ xs: "column", sm: "row" }} spacing={1} sx={{ mb: 1 }}>
-                  <TextField size="small" label="Fallback official USD/NGN" value={fallbackOfficial} onChange={(e) => setFallbackOfficial(e.target.value)} />
-                  <TextField size="small" label="Fallback parallel USD/NGN" value={fallbackParallel} onChange={(e) => setFallbackParallel(e.target.value)} />
-                  <Button size="small" variant="outlined" onClick={saveRates}>Save fallback rates</Button>
-                </Stack>
-                <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
-                  {["normal", "elevated", "severe"].map((level) => (
-                    <Button key={level} size="small" variant="outlined" onClick={async () => { await postDesk("/v1/port-risk", { level }); setCompany({ ...company, port_risk: level }); }}>{level}</Button>
-                  ))}
-                  <Button size="small" variant="outlined" onClick={() => postDesk("/v1/finance/apply", { record_id: shown[0]?.record_id || "manual", principal_ngn: shown[0]?.financing?.principal_ngn || shown[0]?.commercial?.customs_and_tax || 0 })}>Request duty finance</Button>
-                  <Button size="small" variant="outlined" onClick={() => postDesk("/v1/escrow", { record_id: shown[0]?.record_id || "manual", amount_ngn: shown[0]?.commercial?.total_amount || 0, action: "hold" })}>Hold on escrow ledger</Button>
-                  <Button size="small" variant="outlined" onClick={() => postDesk("/v1/escrow", { record_id: shown[0]?.record_id || "manual", amount_ngn: shown[0]?.commercial?.total_amount || 0, action: "release" })}>Release ledger</Button>
-                  <Button size="small" variant="outlined" onClick={() => postDesk("/v1/payouts", { record_id: shown[0]?.record_id || "manual", trucker_account: "trucker", agent_account: "agent", customs_account: "customs" })}>Save payout plan</Button>
-                  <Button size="small" variant="outlined" onClick={loadReviews}>Human reviews</Button>
-                </Stack>
-                {deskNote ? <Typography variant="body2" sx={{ mt: 1 }}>{deskNote}</Typography> : null}
-                {reviews.filter((row) => row.status === "pending" && (row.kind === "pay" || row.kind === "clear")).map((row) => (
-                  <Stack key={row.id} direction="row" spacing={1} sx={{ mt: 1 }} alignItems="center">
-                    <Typography variant="body2">#{row.id} {row.kind}: {row.summary}</Typography>
-                    <Button size="small" variant="contained" onClick={() => decideReview(row.id, "approved")}>Approve</Button>
-                    <Button size="small" onClick={() => decideReview(row.id, "rejected")}>Reject</Button>
-                  </Stack>
-                ))}
-              </Paper>
-            ) : null}
-            <Grid container spacing={2}>
-              {[
-                ["Parses left", me.quota_remaining, `of ${me.plan_parses} on the paid plan`],
-                ["Quotes in this pack", shown.length, "Telegram, email, and uploads"],
-                ["Quoted total", shown.length ? charts.quoted.toLocaleString() : "—", "sum of quote totals"],
-                ["Customs and tax", shown.length ? charts.customs.toLocaleString() : "—", "classified customs lines"],
-              ].map(([label, value, hint]) => (
-                <Grid key={label} size={{ xs: 12, sm: 6, md: 3 }}>
-                  <Card>
-                    <CardContent>
-                      <Typography variant="body2" color="text.secondary">{label}</Typography>
-                      <Typography variant="h4">{value}</Typography>
-                      <Typography variant="caption" color="text.secondary">{hint}</Typography>
-                    </CardContent>
-                  </Card>
-                </Grid>
-              ))}
-            </Grid>
-
-            <Paper sx={{ p: 2 }}>
-              <Stack direction={{ xs: "column", md: "row" }} spacing={2} alignItems={{ md: "center" }} component="form" onSubmit={upload}>
-                <Button component="label" variant="contained" startIcon={<UploadFileIcon />}>
-                  Choose quote files
-                  <input name="quotes" hidden type="file" accept=".pdf,.txt,application/pdf,text/plain" multiple required onChange={(e) => setChosen(Array.from(e.target.files || []).map((file) => file.name))} />
-                </Button>
-                <Typography sx={{ flexGrow: 1 }} color="text.secondary">{chosen.length ? chosen.join(", ") : "No file chosen yet"}</Typography>
-                <Button type="submit" variant="contained" color="secondary" disabled={busy}>{busy ? "Reading quotes…" : "Build client pack"}</Button>
-                <Button variant="outlined" startIcon={<PaymentsIcon />} onClick={() => pay("quote-200")}>₦15,000 / 200</Button>
-                <Button variant="outlined" startIcon={<PaymentsIcon />} onClick={() => pay("quote-1000")}>₦50,000 / 1,000</Button>
-                <Button variant="outlined" disabled={!batchId} onClick={() => download("xlsx")}>Excel</Button>
-                <Button variant="outlined" disabled={!batchId} onClick={() => download("pdf")}>PDF</Button>
-              </Stack>
-              <Typography variant="body2" sx={{ mt: 1 }}>Live intake checks Telegram and email every 8 seconds. {live.length} quote{live.length === 1 ? "" : "s"} arrived without an upload.</Typography>
-              <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 1 }}>
-                API key {me.api_key.slice(0, 6)}…{me.api_key.slice(-4)} · ₦{Number(me.plan_price_ngn).toLocaleString()} for {me.plan_parses} parses
-              </Typography>
-            </Paper>
-
-            {shown[0]?.fx ? (
-              <Paper sx={{ p: 2 }}>
-                <Typography variant="h6">Cash needed</Typography>
-                <Typography variant="body2" color="text.secondary">{shown[0].fx.note}</Typography>
-                <Grid container spacing={2} sx={{ mt: 0.5 }}>
-                  {["cbn", "parallel"].map((tier) => (
-                    <Grid key={tier} size={{ xs: 12, md: 6 }}>
-                      <Card variant="outlined">
-                        <CardContent>
-                          <Typography variant="overline">{tier === "cbn" ? "Official figures" : "Parallel cash rate"}</Typography>
-                          {shown[0].fx[tier]?.anomaly ? (
-                            <Typography>FX calculation anomaly. This rate was withheld.</Typography>
-                          ) : (
-                            <>
-                              <Typography>USD {shown[0].fx[tier].USD?.toLocaleString() ?? "—"}</Typography>
-                              <Typography>CNY {shown[0].fx[tier].CNY?.toLocaleString() ?? "—"}</Typography>
-                              <Typography>NGN {shown[0].fx[tier].NGN?.toLocaleString() ?? "Set a parallel rate"}</Typography>
-                            </>
-                          )}
-                        </CardContent>
-                      </Card>
-                    </Grid>
-                  ))}
-                </Grid>
-                <Stack direction={{ xs: "column", sm: "row" }} spacing={1} sx={{ mt: 2 }}>
-                  <TextField size="small" label="Parallel USD/NGN" value={parallelRate} onChange={(e) => setParallelRate(e.target.value)} />
-                  <TextField size="small" label="CBN USD/NGN override" value={cbnRate} onChange={(e) => setCbnRate(e.target.value)} />
-                  <Button variant="outlined" onClick={saveRates}>Save rates</Button>
-                </Stack>
-                <Typography variant="body2" sx={{ mt: 1 }}>
-                  {shown[0].financing?.offered
-                    ? `Duty finance estimate NGN ${shown[0].financing.principal_ngn?.toLocaleString()} plus fee NGN ${shown[0].financing.origination_fee_ngn?.toLocaleString()}. ${shown[0].financing.reason}`
-                    : shown[0].financing?.reason}
-                </Typography>
-                <Typography variant="body2">{shown[0].demurrage?.reason}{shown[0].demurrage?.buffer_hours ? "" : ` Buffer NGN ${Number(shown[0].demurrage?.buffer_ngn || 0).toLocaleString()}.`}</Typography>
-                <Typography variant="body2">{shown[0].split?.execution}</Typography>
-              </Paper>
-            ) : null}
-
-            <Grid container spacing={2}>
-              <Grid size={{ xs: 12, md: 7 }}>
-                <Paper sx={{ p: 2, height: 360 }}>
-                  <Typography variant="h6">Charges by category</Typography>
-                  {charts.categories.length ? (
-                    <BarChart
-                      height={290}
-                      xAxis={[{ scaleType: "band", data: charts.categories }]}
-                      series={[{ data: charts.amounts, label: "Amount", color: "#0b3954" }]}
-                    />
-                  ) : (
-                    <Typography color="text.secondary" sx={{ mt: 8, textAlign: "center" }}>Upload a quote to chart the charges.</Typography>
-                  )}
-                </Paper>
-              </Grid>
-              <Grid size={{ xs: 12, md: 5 }}>
-                <Paper sx={{ p: 2, height: 360 }}>
-                  <Typography variant="h6">Quota and lanes</Typography>
-                  <BarChart
-                    height={140}
-                    layout="horizontal"
-                    yAxis={[{ scaleType: "band", data: ["Parses left"] }]}
-                    xAxis={[{ max: quotaMax }]}
-                    series={[{ data: [me.quota_remaining], color: "#e07a2f", label: "Remaining" }]}
-                  />
-                  {charts.lanes.length ? (
-                    <PieChart height={160} series={[{ data: charts.lanes, innerRadius: 28 }]} />
-                  ) : (
-                    <Typography color="text.secondary">Lane mix appears after a pack is built.</Typography>
-                  )}
-                </Paper>
-              </Grid>
-            </Grid>
-
-            <Paper>
-              <Table size="small">
-                <TableHead>
-                  <TableRow>
-                    <TableCell>Vendor</TableCell>
-                    <TableCell>Reference</TableCell>
-                    <TableCell>Lane</TableCell>
-                    <TableCell>Route</TableCell>
-                    <TableCell align="right">Total</TableCell>
-                    <TableCell />
-                  </TableRow>
-                </TableHead>
-                <TableBody>
-                  {shown.length ? shown.map((record, index) => (
-                    <TableRow key={`${record.record_id || record.commercial?.quote_reference_id || record.source_file || "quote"}-${index}`}>
-                      <TableCell>{record.commercial.vendor_name}</TableCell>
-                      <TableCell>{record.commercial.quote_reference_id}</TableCell>
-                      <TableCell><Chip size="small" label={record.lane} /></TableCell>
-                      <TableCell>{record.movement.origin?.location_name} → {record.movement.destination?.location_name}</TableCell>
-                      <TableCell align="right">{money(record.commercial.currency, record.commercial.total_amount)}</TableCell>
-                      <TableCell align="right">
-                        {record.record_id ? <Button size="small" color="error" onClick={() => removeQuote(record.record_id)}>Delete</Button> : null}
-                      </TableCell>
-                    </TableRow>
-                  )) : (
-                    <TableRow>
-                      <TableCell colSpan={6}>No quotes in this pack yet.</TableCell>
-                    </TableRow>
-                  )}
-                </TableBody>
-              </Table>
-            </Paper>
-          </Stack>
-        )}
+  return <Box sx={{ minHeight: "100vh" }}>
+    <Box component="a" href="#main-content" sx={{ position: "fixed", top: -60, left: 16, zIndex: 2000, p: 1.5, bgcolor: "white", "&:focus": { top: 12 } }}>Skip to main content</Box>
+    <Box component="aside" sx={{ display: { xs: "none", md: "flex" }, position: "fixed", inset: "0 auto 0 0", width: 232, bgcolor: "#fcfdfb", borderRight: 1, borderColor: "divider", p: 2.5, flexDirection: "column", gap: 4 }}>
+      <Stack direction="row" spacing={1.2} alignItems="center" sx={{ mt: 1 }}><Avatar variant="rounded" sx={{ bgcolor: "primary.main", width: 34, height: 34 }}><LocalShippingOutlined fontSize="small" /></Avatar><Box><Typography fontWeight={750} fontSize={14}>Clearing Desk</Typography><Typography variant="caption" color="text.secondary">Quote workspace</Typography></Box></Stack>
+      <Box><Typography variant="overline" color="text.secondary" sx={{ px: 2, fontSize: 10 }}>WORKSPACE</Typography><Stack component="nav" aria-label="Main navigation" spacing={.8} sx={{ mt: 1 }}>{navButtons()}</Stack></Box>
+      <Box sx={{ mt: "auto", p: 2, bgcolor: "#f0f3ec", borderRadius: 2 }}><Typography variant="body2" fontWeight={650}>{me.quota_remaining} parses left</Typography><LinearProgress variant="determinate" value={Math.min(100, Math.max(0, me.quota_remaining / Math.max(me.plan_parses || 5, 1) * 100))} sx={{ my: 1.5, height: 5, borderRadius: 3, bgcolor: "#dde5d7" }} /><Typography variant="caption" color="text.secondary">{me.plan === "trial" ? "Your trial allowance" : "Your current allowance"}</Typography><Button size="small" onClick={() => navigate("settings")} endIcon={<ArrowForward fontSize="small" />} sx={{ display: "flex", px: 0, mt: .5 }}>Manage usage</Button></Box>
+      <Stack direction="row" alignItems="center" spacing={1}><Avatar sx={{ width: 32, height: 32, fontSize: 13, bgcolor: "#eadfcf", color: "#5b4a30" }}>{me.business_name?.slice(0, 1).toUpperCase()}</Avatar><Typography variant="caption" sx={{ flex: 1, overflowWrap: "anywhere" }}>{me.business_name}</Typography><IconButton aria-label="Sign out" onClick={onSignOut}><Logout fontSize="small" /></IconButton></Stack>
+    </Box>
+    <Box sx={{ ml: { md: "232px" } }}>
+      <Box component="header" sx={{ bgcolor: "#fcfdfb", borderBottom: 1, borderColor: "divider", px: { xs: 2, md: 4 }, py: 1.7 }}><Stack direction="row" justifyContent="space-between" alignItems="center"><Typography variant="body2" color="text.secondary"><Box component="span" sx={{ display: { xs: "none", md: "inline" } }}>Workspace / </Box><Box component="span" sx={{ color: "text.primary", fontWeight: 600 }}>{navigation.find((item) => item.id === section)?.label}</Box></Typography><Stack direction="row" gap={1} alignItems="center"><Typography variant="caption" color="text.secondary">{me.business_name}</Typography><IconButton aria-label="Sign out" onClick={onSignOut} sx={{ display: { md: "none" } }}><Logout fontSize="small" /></IconButton></Stack></Stack><Stack component="nav" aria-label="Mobile navigation" direction="row" gap={.5} sx={{ display: { xs: "grid", md: "none" }, gridTemplateColumns: "repeat(2, minmax(0, 1fr))", pt: 1.5 }}>{navButtons()}</Stack></Box>
+      <Container component="main" id="main-content" tabIndex={-1} maxWidth="xl" sx={{ px: { xs: 2, md: 4 }, py: { xs: 3, md: 4 } }}>
+        <Stack direction={{ xs: "column", sm: "row" }} justifyContent="space-between" alignItems={{ sm: "center" }} gap={2} sx={{ mb: 3.5 }}><Box><Typography variant="overline" color="text.secondary" sx={{ fontSize: 10, letterSpacing: ".12em" }}>QUOTE OPERATIONS</Typography><Typography variant="h1" sx={{ fontSize: { xs: 29, md: 35 }, mt: .5 }}>{headings[section][0]}</Typography><Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>{headings[section][1]}</Typography></Box>{section === "quotes" && <Button variant="contained" startIcon={<Add />} onClick={() => addQuote()}>Add a quote</Button>}</Stack>
+        {error && <Alert severity="error" onClose={() => setError("")} sx={{ mb: 2 }}>{error}</Alert>}{notice && <Alert severity="info" role="status" onClose={() => setNotice("")} sx={{ mb: 2 }}>{notice}</Alert>}
+        {section === "quotes" && <Stack spacing={3}>
+          {me.quota_remaining <= 2 && <Alert severity={me.quota_remaining === 0 ? "warning" : "info"} action={<Button color="inherit" onClick={() => navigate("settings")}>Manage usage</Button>}>{me.quota_remaining === 0 ? "Your parse allowance is used up. You can still check and export saved quotes." : `${me.quota_remaining} parses left. Each uploaded file or pasted quote uses one parse.`}</Alert>}
+          <Box sx={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: { xs: 1, sm: 2 } }}>{[["Recent quotes", inbox === null ? null : shown.length, "Uploads, Telegram, and email"], ["To check", inbox === null ? null : shown.length - checked, "Your next step before export"], ["Checked", inbox === null ? null : checked, "Ready to prepare for your client"]].map(([label, count, hint]) => <Paper key={label} sx={{ ...panel, p: { xs: 1.5, md: 3 }, py: { md: 2.3 } }}><Typography variant="body2" color="text.secondary" sx={{ fontSize: { xs: 12, sm: 14 } }}>{label}</Typography>{count === null ? <Skeleton width={60} height={48} /> : <Typography sx={{ fontSize: { xs: 26, sm: 32 }, fontWeight: 650, letterSpacing: "-.04em", my: .5 }}>{count}</Typography>}<Typography variant="caption" color="text.secondary" sx={{ display: { xs: "none", sm: "block" } }}>{hint}</Typography></Paper>)}</Box>
+          {!!pack.records.length && <Paper sx={{ ...panel, bgcolor: "#eef3e9", borderColor: "#d9e2d0" }}><Stack direction={{ xs: "column", lg: "row" }} justifyContent="space-between" gap={2} alignItems={{ lg: "center" }}><Box><Typography variant="h2">Your current client pack</Typography><Typography variant="body2" color="text.secondary" sx={{ mt: .5 }}>{packRecords.length - packUnchecked.length} of {packRecords.length} quotes checked. {packUnchecked.length ? "Check each quote before exporting the pack." : "All quotes checked. Your pack is ready to export."}</Typography></Box><Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>{packUnchecked.length ? <Button variant="contained" onClick={() => setSelected(packUnchecked[0])}>Check next quote <ArrowForward sx={{ ml: 1, fontSize: 16 }} /></Button> : <><Button variant="outlined" disabled={!!busy} onClick={() => exportPack("xlsx")}>Excel pack</Button><Button variant="contained" disabled={!!busy} startIcon={<DownloadOutlined />} onClick={() => exportPack("pdf")}>PDF pack</Button></>}</Stack></Stack></Paper>}
+          <QuoteInbox inbox={inbox} shown={shown} visible={visible} error={inboxError} updatedAt={updatedAt} busy={!!busy} refresh={() => perform("refresh", () => refresh())} filter={filter} onFilter={setFilter} search={search} onSearch={setSearch} onOpen={setSelected} onAdd={() => addQuote()} onConnect={() => navigate("connections")} />
+          <Typography variant="caption" color="text.secondary">Quote totals stay in their original currencies. Open a quote for its NGN cash estimate.</Typography>
+        </Stack>}
+        {section === "approvals" && <Approvals reviews={reviews} error={reviewsError} refresh={() => refresh()} busy={busy} confirm={setConfirmation} token={token} notify={setNotice} />}
+        {["settings", "connections"].includes(section) && setupError && <Alert severity="error" action={<Button color="inherit" onClick={() => loadSetup()}>Retry</Button>} sx={{ mb: 2 }}>{setupError}</Alert>}
+        {section === "connections" && <Connections token={token} company={company} perform={perform} busy={busy} notify={setNotice} onQuotes={() => navigate("quotes")} onAdd={() => addQuote()} />}
+        {section === "settings" && <Settings key={`${company?.code}-${rates?.parallel_usd_ngn}`} token={token} me={me} company={company} rates={rates} perform={perform} busy={busy} notify={setNotice} onRateSaved={setRates} onRiskSaved={(value) => setCompany((current) => ({ ...current, port_risk: value }))} />}
       </Container>
     </Box>
-  );
+    {intake && <IntakeDialog token={token} quota={me.quota_remaining} seed={seed} onClose={() => setIntake(false)} onCreated={onCreated} onSettings={() => { setIntake(false); navigate("settings"); }} />}
+    {selected && <QuoteDialog key={selected.record_id} token={token} record={selected} onClose={() => setSelected(null)} onUpdate={updateRecord} onCorrect={(record) => { setSelected(null); addQuote(record.source_text || ""); }} onDelete={confirmDelete} />}
+    <Dialog open={!!confirmation} onClose={busy ? undefined : () => setConfirmation(null)} fullWidth maxWidth="xs" aria-labelledby="confirmation-title"><DialogTitle id="confirmation-title">{confirmation?.title}</DialogTitle><DialogContent><Typography variant="body2">{confirmation?.description}</Typography></DialogContent><DialogActions sx={{ p: 2.5 }}><Button disabled={!!busy} onClick={() => setConfirmation(null)}>Cancel</Button><Button variant="contained" color={confirmation?.danger ? "error" : "primary"} disabled={!!busy} onClick={() => perform("confirm", async () => { await confirmation.action(); setConfirmation(null); })}>{busy === "confirm" ? "Saving…" : confirmation?.label}</Button></DialogActions>{error && <Alert severity="error" sx={{ mx: 3, mb: 2 }}>{error}</Alert>}</Dialog>
+  </Box>;
+}
+
+export default function HomePage() {
+  const [session, setSession] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const checkSession = useCallback(async () => {
+    setLoading(true); setError("");
+    const token = window.localStorage.getItem("quote_token");
+    if (!token) { setLoading(false); return; }
+    try { const user = await request(token, "/v1/me"); setSession({ ...user, token }); }
+    catch (err) { if (err.status === 401) window.localStorage.removeItem("quote_token"); else setError(err.message); }
+    finally { setLoading(false); }
+  }, []);
+  useEffect(() => { checkSession(); }, [checkSession]);
+  if (loading || error) return <Container maxWidth="sm" sx={{ py: 12, textAlign: "center" }}>{loading ? <><CircularProgress size={28} /><Typography role="status" sx={{ mt: 2 }}>Opening your workspace…</Typography></> : <Alert severity="error" action={<Button color="inherit" onClick={checkSession}>Retry</Button>}>{error}</Alert>}</Container>;
+  if (!session) return <Auth onSession={setSession} />;
+  return <Workspace key={session.id} token={session.token} initialUser={session} onSignOut={() => { window.localStorage.removeItem("quote_token"); setSession(null); window.location.hash = ""; }} />;
 }

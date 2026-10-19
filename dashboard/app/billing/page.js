@@ -1,60 +1,34 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { Suspense, useCallback, useEffect, useState } from "react";
 import { useSearchParams } from "next/navigation";
-import { Alert, Button, Container, Paper, Stack, Typography } from "@mui/material";
-import { Suspense } from "react";
-
-const API = process.env.NEXT_PUBLIC_API_URL || "";
+import { Alert, Button, CircularProgress, Container, Paper, Stack, Typography } from "@mui/material";
+import { request } from "../workflow.mjs";
 
 function BillingReturn() {
   const params = useSearchParams();
   const reference = params.get("reference") || params.get("trxref") || "";
-  const [message, setMessage] = useState("Confirming the Paystack payment…");
-  const [ok, setOk] = useState(false);
-
-  useEffect(() => {
+  const [state, setState] = useState("checking");
+  const [message, setMessage] = useState("");
+  const verify = useCallback(async () => {
     const token = window.localStorage.getItem("quote_token");
-    if (!reference) {
-      setMessage("Paystack did not return a payment reference.");
-      return;
-    }
-    if (!token) {
-      setMessage("Sign in on the desk first, then open this payment link again.");
-      return;
-    }
-    fetch(`${API}/v1/billing/verify`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ reference }),
-    })
-      .then(async (response) => {
-        const payload = await response.json();
-        if (!response.ok) throw new Error(payload.detail || "Payment was not confirmed");
-        setOk(true);
-        setMessage(`Payment ${payload.reference} is confirmed. Parses left: ${payload.quota_remaining}.`);
-      })
-      .catch((error) => setMessage(error.message));
+    if (!reference) { setState("error"); setMessage("No payment reference was returned. Return to Settings to start checkout again."); return; }
+    if (!token) { setState("error"); setMessage("Sign in to your workspace, then reopen this payment link to confirm your payment."); return; }
+    setState("checking");
+    try {
+      const payload = await request(token, "/v1/billing/verify", { method: "POST", body: JSON.stringify({ reference }) });
+      setState("success"); setMessage(`Payment confirmed. You now have ${payload.quota_remaining} parses available.`);
+    } catch (error) { setState("error"); setMessage(error.message); }
   }, [reference]);
-
-  return (
-    <Container maxWidth="sm" sx={{ py: 8 }}>
-      <Paper sx={{ p: 4 }}>
-        <Stack spacing={2}>
-          <Typography variant="h4">Back from Paystack</Typography>
-          <Alert severity={ok ? "success" : "info"}>{message}</Alert>
-          <Typography variant="body2" color="text.secondary">Reference {reference || "—"}</Typography>
-          <Button variant="contained" href="/">Return to the clearing desk</Button>
-        </Stack>
-      </Paper>
-    </Container>
-  );
+  useEffect(() => { verify(); }, [verify]);
+  return <Container component="main" maxWidth="sm" sx={{ py: 8 }}><Paper variant="outlined" sx={{ p: 4 }}><Stack spacing={3}>
+    <Typography variant="overline" color="text.secondary">CLEARING DESK / SUBSCRIPTION</Typography><Typography variant="h1" sx={{ fontSize: 28 }}>{state === "checking" ? "Confirming your payment" : state === "success" ? "You’re ready to continue" : "Payment needs a check"}</Typography>
+    {state === "checking" ? <Stack direction="row" spacing={2} alignItems="center" role="status"><CircularProgress size={22} /><Typography variant="body2">Checking the payment with Paystack. Please wait.</Typography></Stack> : <Alert severity={state === "success" ? "success" : "error"}>{message}</Alert>}
+    <Typography variant="body2" color="text.secondary" sx={{ overflowWrap: "anywhere" }}>Reference: {reference || "Not provided"}</Typography>
+    <Stack direction="row" spacing={1}>{state === "error" && reference && <Button variant="outlined" onClick={verify}>Retry confirmation</Button>}<Button variant="contained" href={state === "success" ? "/#quotes" : "/#settings"}>{state === "success" ? "Return to quotes" : "Back to workspace"}</Button></Stack>
+  </Stack></Paper></Container>;
 }
 
 export default function BillingPage() {
-  return (
-    <Suspense fallback={<Typography sx={{ p: 4 }}>Opening the payment result…</Typography>}>
-      <BillingReturn />
-    </Suspense>
-  );
+  return <Suspense fallback={<Typography role="status" sx={{ p: 4 }}>Opening your payment result…</Typography>}><BillingReturn /></Suspense>;
 }

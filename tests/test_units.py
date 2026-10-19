@@ -4,6 +4,7 @@ import json
 import os
 import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 os.environ["QUOTE_DB"] = tempfile.mktemp(suffix=".sqlite")
@@ -32,6 +33,37 @@ from workers import submit
 api_main._alert_telegram = lambda *args, **kwargs: None
 CLIENT = TestClient(api_main.app)
 BIZ = {"id": "demo", "legal_name": "Demo Global Logistics", "home_country": "Nigeria"}
+
+_MODULE_PATCHES = []
+_MODULE_STATE = None
+
+
+def setUpModule():
+    """Keep accounts and newly persisted API quotes out of the working desk."""
+    global _MODULE_STATE
+    import api.store as store
+    import desk_ops
+    import market
+
+    _MODULE_STATE = tempfile.TemporaryDirectory(prefix="quote-unit-suite-")
+    root = Path(_MODULE_STATE.name)
+    for patcher in (
+        patch.object(store, "DB_PATH", root / "billing.sqlite"),
+        patch.object(api_main, "ROOT", root),
+        patch.object(desk_ops, "RECORDS", root / "state" / "records"),
+        patch.object(market, "RATE_CACHE", root / "rates.json"),
+        patch.object(market, "fetch_market_rates", return_value={"source": "test", "usd_ngn": 1500, "usd_cny": 7.2, "cny_ngn": 208.3333}),
+    ):
+        patcher.start()
+        _MODULE_PATCHES.append(patcher)
+
+
+def tearDownModule():
+    for patcher in reversed(_MODULE_PATCHES):
+        patcher.stop()
+    _MODULE_PATCHES.clear()
+    if _MODULE_STATE:
+        _MODULE_STATE.cleanup()
 
 
 def priced(text: str) -> dict:
@@ -275,7 +307,8 @@ class ApiTests(unittest.TestCase):
     def test_health_and_webhook(self):
         health = CLIENT.get("/health")
         self.assertEqual(health.status_code, 200)
-        hook = CLIENT.post("/telegram/webhook", json={"update_id": 0})
+        with patch.dict(os.environ, {"TELEGRAM_DELIVERY_MODE": "webhook", "TELEGRAM_WEBHOOK_SECRET": "unit-webhook-secret"}), patch("telegram_jobs.enqueue"), patch.object(api_main, "_run_telegram_update"):
+            hook = CLIENT.post("/telegram/webhook", headers={"x-telegram-bot-api-secret-token": "unit-webhook-secret"}, json={"update_id": 0})
         self.assertEqual(hook.status_code, 200)
 
     def test_auth_parse_and_terminal(self):
@@ -324,7 +357,9 @@ class DeskOpsTests(unittest.TestCase):
         self.assertTrue(result["recalculated"])
         self.assertEqual(record["commercial"]["total_amount"], 170000)
         resolve_flag(record, "gate_in_70", "split_50_50")
-        self.assertEqual(record["line_items"][2]["amount"], round(20000 / 0.70 * 0.50, 2))
+        self.assertEqual(record["line_items"][2]["amount"], 20000)
+        self.assertEqual(record["commercial"]["total_amount"], 170000)
+        self.assertIn("50/50", record["commercial"]["payment_terms"])
         matrix = comparison_matrix([record])
         self.assertEqual(matrix["lane"], "Ningbo -> Apapa")
         save_market_rate("Apapa -> Makurdi", 1_850_000, "40ft Flatbed", "road")
@@ -358,7 +393,8 @@ class DeskOpsTests(unittest.TestCase):
             "fx": {"cbn": {"NGN": 80000}},
             "disclaimer": "Desk estimate.",
         }
-        path = os.path.join(os.path.dirname(__file__), "..", "state", "records", "unit-flag.json")
+        from desk_ops import RECORDS
+        path = str(RECORDS / "unit-flag.json")
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w", encoding="utf-8") as handle:
             json.dump(record, handle)

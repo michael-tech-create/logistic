@@ -923,13 +923,13 @@ def compose_client_reply(client_text: str, record: dict, decision: str, held: st
 
 
 def _repair_route(raw_quote_text: str, quote: QuoteExtractionResult) -> QuoteExtractionResult:
-    """Fill Origin and Destination labels the model left blank."""
-    labeled_origin = re.search(r"^Origin:\s*(.+)$", raw_quote_text, re.I | re.M)
-    labeled_destination = re.search(r"^Destination:\s*(.+)$", raw_quote_text, re.I | re.M)
-    if labeled_origin and not quote.shipment_details.origin.location_name:
-        quote.shipment_details.origin = _location(labeled_origin.group(1))
-    if labeled_destination and not quote.shipment_details.destination.location_name:
-        quote.shipment_details.destination = _location(labeled_destination.group(1))
+    """Prefer the latest explicit route labels, including follow-up corrections."""
+    labeled_origin = list(re.finditer(r"^Origin:[ \t]*(.+)$", raw_quote_text, re.I | re.M))
+    labeled_destination = list(re.finditer(r"^Destination:[ \t]*(.+)$", raw_quote_text, re.I | re.M))
+    if labeled_origin:
+        quote.shipment_details.origin = _location(labeled_origin[-1].group(1))
+    if labeled_destination:
+        quote.shipment_details.destination = _location(labeled_destination[-1].group(1))
     _annotate_place(quote.shipment_details.origin)
     _annotate_place(quote.shipment_details.destination)
     return quote

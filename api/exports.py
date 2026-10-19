@@ -3,11 +3,21 @@
 from __future__ import annotations
 
 from io import BytesIO
+from pathlib import Path
 
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill
 from pypdf import PdfReader
 from fpdf import FPDF
+
+
+def new_pdf() -> FPDF:
+    """Bundle the font so naira signs and common Unicode work in Docker too."""
+    pdf = FPDF()
+    fonts = Path(__file__).resolve().parents[1] / "assets" / "fonts"
+    for style, filename in (("", "DejaVuSans.ttf"), ("B", "DejaVuSans-Bold.ttf"), ("I", "DejaVuSans-Oblique.ttf")):
+        pdf.add_font("Desk", style, str(fonts / filename))
+    return pdf
 
 
 def pdf_to_text(data: bytes) -> str:
@@ -63,7 +73,7 @@ def build_xlsx(records: list[dict], business_name: str) -> bytes:
 
 
 def build_pdf(records: list[dict], business_name: str) -> bytes:
-    pdf = FPDF()
+    pdf = new_pdf()
     pdf.set_auto_page_break(auto=True, margin=16)
     for record in records:
         commercial = record["commercial"]
@@ -74,16 +84,16 @@ def build_pdf(records: list[dict], business_name: str) -> bytes:
         pdf.set_fill_color(11, 57, 84)
         pdf.rect(0, 0, 210, 22, "F")
         pdf.set_text_color(255, 255, 255)
-        pdf.set_font("Helvetica", "B", 14)
+        pdf.set_font("Desk", "B", 14)
         pdf.set_xy(12, 7)
         pdf.cell(0, 8, business_name)
         pdf.set_text_color(23, 35, 45)
         pdf.set_xy(12, 30)
-        pdf.set_font("Helvetica", "B", 12)
+        pdf.set_font("Desk", "B", 12)
         title = f"{commercial.get('vendor_name') or 'Quote'}  {commercial.get('quote_reference_id') or ''}"
         pdf.multi_cell(186, 8, title.strip())
         pdf.set_x(12)
-        pdf.set_font("Helvetica", "", 11)
+        pdf.set_font("Desk", "", 11)
         rows = [
             f"Lane: {record.get('lane')}",
             f"Route: {origin.get('location_name') or '-'} ({origin.get('port_code') or '-'}) to {destination.get('location_name') or '-'} ({destination.get('port_code') or '-'})",
@@ -96,14 +106,14 @@ def build_pdf(records: list[dict], business_name: str) -> bytes:
             pdf.multi_cell(186, 7, row)
         pdf.ln(2)
         pdf.set_x(12)
-        pdf.set_font("Helvetica", "B", 11)
+        pdf.set_font("Desk", "B", 11)
         pdf.cell(186, 7, "Charges", new_x="LMARGIN", new_y="NEXT")
-        pdf.set_font("Helvetica", "", 10)
+        pdf.set_font("Desk", "", 10)
         for item in record.get("line_items") or []:
             pdf.set_x(12)
             pdf.multi_cell(186, 6, f"{item.get('description')}  [{item.get('category')}]  {commercial.get('currency')} {item.get('amount')}")
         pdf.ln(4)
         pdf.set_x(12)
-        pdf.set_font("Helvetica", "I", 8)
+        pdf.set_font("Desk", "I", 8)
         pdf.multi_cell(186, 5, record.get("disclaimer") or "")
     return bytes(pdf.output())

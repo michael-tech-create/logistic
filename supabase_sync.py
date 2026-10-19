@@ -38,6 +38,8 @@ def sync_quote(record: dict, record_id: str, *, chat_id: str | None = None, tele
     """Upsert the quote, replace its lines and splits, and return the Supabase row id."""
     if not (os.environ.get("SUPABASE_URL") and os.environ.get("SUPABASE_SERVICE_ROLE_KEY")):
         return None
+    chat_id = chat_id if chat_id is not None else record.get("chat_id")
+    telegram_user_id = telegram_user_id if telegram_user_id is not None else record.get("telegram_user_id")
     commercial = record.get("commercial") or {}
     fx = record.get("fx") or {}
     official = fx.get("cbn") or {}
@@ -104,6 +106,20 @@ def delete_quote(record_id: str, company_id: str) -> bool:
         None,
     )
     return True
+
+
+def get_quote(record_id: str, company_id: str) -> dict | None:
+    """Read one company-owned quote, including its saved desk review."""
+    rows = _request(
+        "GET",
+        f"quotes?record_id=eq.{urllib.parse.quote(record_id, safe='')}&company_id=eq.{urllib.parse.quote(company_id, safe='')}&select=payload&limit=1",
+        None,
+    )
+    if not isinstance(rows, list) or not rows:
+        return None
+    payload = rows[0].get("payload") or {}
+    payload = json.loads(payload) if isinstance(payload, str) else payload
+    return {**payload, "record_id": record_id, "company_id": company_id}
 
 
 def list_quotes(company_id: str) -> list[dict] | None:

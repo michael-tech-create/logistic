@@ -45,7 +45,7 @@ This project does that pass once:
 
 | Piece | What it does |
 | --- | --- |
-| Telegram bot `@freight_quote_bot` | Accepts text, voice notes, photos, and PDFs. Replies in the chat and emails the longer letter. |
+| Telegram bot `@freight_quote_bot` | Links a company, accepts text, voice notes, photos, and PDF/TXT files, then guides checking and export. Email copies follow the quote check. |
 | Email intake | Reads unread mail for the addresses listed on the business, and ignores mail the desk sent itself. |
 | Quote API | FastAPI on port 8000. Parse, batch upload, Excel, PDF, company tools, plans, and human reviews. |
 | Clearing desk | Next.js app on port 3000. Charts, inbox, delete, port-risk level, fallback rates, and the review queue. |
@@ -53,7 +53,7 @@ This project does that pass once:
 | Supabase sync | Upserts a priced quote into `quotes`, `line_items`, and `quote_splits` after you run `supabase/schema.sql`. |
 | Terminal watcher | A Go program that reads the public PTML Tin Can vessel schedule and posts it to the API. |
 
-New accounts get 5 trial parses. Paystack then offers two monthly plans: ₦15,000 for 200 parses (`quote-200`) and ₦50,000 for 1,000 parses (`quote-1000`). `POST /v1/quotes/parse` and `POST /v1/quotes/batch` reject the call with 402 when the account is over its cap.
+New accounts get 5 trial parses. Paystack then offers two monthly plans: ₦15,000 for 200 parses (`quote-200`) and ₦50,000 for 1,000 parses (`quote-1000`). `POST /v1/quotes/parse` and `POST /v1/quotes/batch` reject the call with 402 when the account is over its cap. Telegram also uses the linked account's allowance for new priced quotes; commands, failed file reads, and replies completing a charged draft do not use another parse.
 
 ## How a quote moves
 
@@ -62,10 +62,12 @@ New accounts get 5 trial parses. Paystack then offers two monthly plans: ₦15,0
 3. `customs.py` assigns a lane: export, import, cross-trade, domestic, or unknown. The home country comes from the business profile. Incoterms are taken from the document only.
 4. `market.py` adds the naira and yuan view, a 2% duty-finance estimate when duty is present, a demurrage buffer from the desk port-risk setting, and a 70/15/12/3 split across the shipping line, trucker, clearing agent, and platform fee.
 5. `duty.py` adds an HS-code estimate when the text names a known commodity or already contains an 8-digit code. The lines are import duty, import adjustment tax when the table has one, ETLS 0.5%, CISS 1%, and VAT 7.5%.
-6. The record is stored under `state/records/`. Telegram shows the summary and the action buttons. The longer letter goes by email.
-7. Voice notes, photos, and PDFs are read after the bot has accepted the message. `POST /telegram/webhook` returns HTTP 200 immediately and finishes that work in the background. The local poller queues the same heavy files so the next Telegram update is not blocked.
+6. The record is stored under `state/records/` before Telegram shows its buttons. The user checks the extracted details before downloads become available. An email copy is sent after the check when SMTP is configured.
+7. Telegram updates are saved to `state/telegram_jobs.sqlite` before polling acknowledges them, or authenticated webhook intake returns HTTP 200. Workers process files and text in order within each chat, allowing other chats to proceed independently. Drafts and file-backed FX caches expire, and pending storage syncs are retried.
 
 Company signup creates a code such as `co-…`. A Telegram chat links with `/link CODE`.
+
+Telegram commands include `/start`, `/help`, `/new`, `/cancel`, `/status`, `/settings`, `/compare`, `/pay`, `/clear`, and `/unlink`. See [docs/TELEGRAM-WORKFLOW.md](docs/TELEGRAM-WORKFLOW.md) for the repaired features, delivery setup, and workflow. Check configuration without sending messages with `python telegram_diagnostics.py`; add `--live` for read-only Telegram credential/webhook checks.
 
 ## Run it locally
 
@@ -109,7 +111,7 @@ By default it opens `https://www.ptml-nigeria.com/`, takes the first vessel row,
 
 ## Pay, clearance, and human review
 
-On a priced quote, “pay the trucker” calls `PAYOUT_URL` and “clear the cargo” calls `CUSTOMS_CLEAR_URL`. If either address is missing, or the call fails, the bot does not invent a payment or a customs entry. It writes a human review and replies with the review number. The desk button **Human reviews** lists the waiting items. Approve or reject one with `POST /v1/reviews/{id}` and a status of `approved` or `rejected`.
+On a checked quote, “pay the trucker” or `/pay` opens a confirmation for a payment review; “clear the cargo” or `/clear` opens a clearance review. Confirmation queues a person and replies with the review number. Only approval on the desk attempts `PAYOUT_URL` or `CUSTOMS_CLEAR_URL`. If a provider is missing or refuses the call, the request stays pending and no payment or clearance is claimed. The **Approvals** section lists requests and recent decisions. Approve or reject through `POST /v1/reviews/{id}` with a status of `approved` or `rejected`.
 
 ## Honest limits
 
@@ -118,6 +120,21 @@ On a priced quote, “pay the trucker” calls `PAYOUT_URL` and “clear the car
 - The duty table is an estimate on the all-in naira figure. It is not an NCS assessment.
 - Duty finance, escrow, and payout plans on the desk are ledger rows. Paystack charges only the ₦15,000 or ₦50,000 subscription. No lender disburses funds.
 - The bot cannot pay a person or clear cargo until `PAYOUT_URL` and `CUSTOMS_CLEAR_URL` point at a real bank and a real customs system. Until then every such request waits for a person.
+
+## Desk workflow
+
+The dashboard in `dashboard/` is organized into **Quotes**, **Approvals**, **Connections**, and **Settings**.
+
+1. Choose **Add a quote** and upload readable PDF/TXT files (up to 10 MB each), or paste the original text. The desk shows how many parses this needs.
+2. Check the selected quote's route, charges, original text, extraction notes, and currency estimates. Use **Correct quote** to revise the source and create a new quote if needed.
+3. Confirm the check and choose **Mark checked and continue**. The check is saved to that quote and survives a refresh.
+4. Export the selected quote as PDF or Excel. An uploaded client pack becomes available for export in the interface after every quote in it is checked. The most recent pack is restored in the same browser/account.
+
+Finance requests, escrow ledger entries, and payout plans operate on the quote currently open. Payment and clearance requests have a separate **Approvals** queue with confirmation before a decision. **Connections** explains Telegram linking and checks the email connection; **Settings** contains company preferences and subscription checkout.
+
+The inbox shows recent quotes; search and filters apply to the loaded records. Monetary totals retain their original currencies rather than adding USD and NGN together. The separate `web/` parser demonstration is unchanged.
+
+Research rationale, sources, implementation scope, and follow-up usability tasks are in [docs/UX-RESEARCH.md](docs/UX-RESEARCH.md). Run dashboard workflow checks with `cd dashboard && npm test`.
 
 ## Layout
 
@@ -159,7 +176,23 @@ Copy the same keys you use in `.env` into the host’s environment: Gemini, Tele
 
 On Railway, create one service from this repo root, leave the start command as the Dockerfile `CMD`, and add a volume mounted at `/app/state`.
 
-The web service must stay awake. A sleeping instance stops Telegram long-polling and unread-mail checks. Use a plan that does not spin the service down.
+The web service must stay awake. A sleeping instance stops Telegram long-polling and unread-mail checks. The Blueprint above specifies Starter, a paid compute plan without Free's idle spin-down.
+
+### Keep a Free Render service awake
+
+`keep_render_awake.py` sends an HTTP request to `https://logistic-ii6n.onrender.com/health` every 5 minutes. It allows 120 seconds for a cold start and retries failures up to 3 times. It uses only Python's standard library.
+
+Run it on another machine that stays on:
+
+```bash
+python3 keep_render_awake.py
+```
+
+Set `RENDER_HEALTH_URL` or pass `--url` to target another service. Set `RENDER_PING_SECONDS` or pass `--interval` to change the interval (30–600 seconds). The script reads environment variables directly; it does not load `.env`.
+
+For automatic external pings, push `.github/workflows/keep-render-awake.yml` and the script to your GitHub repository's default branch, with Actions enabled. The workflow schedules a check every 5 minutes and can also be run from **Actions → Keep Render awake → Run workflow**. Optionally set the repository Actions variable `RENDER_HEALTH_URL` to override the URL. It uses `--once`, which exits with status 1 if all retries fail. Scheduled runs consume your repository's Actions allowance.
+
+Run the pinger outside the Render service it watches: a process on that service stops when the service sleeps. These pings are best effort. [Render Free](https://render.com/docs/free) sleeps after 15 minutes without inbound traffic and still has monthly usage limits. [GitHub schedules](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#schedule) can be delayed or dropped; public repositories also lose scheduled runs after 60 days without activity. Use a paid Render compute plan when continuous operation is required.
 
 To run the two processes on different hosts later, both need the same `state/` volume. Until then, keep the single container.
 

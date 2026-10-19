@@ -32,7 +32,8 @@ def attempt(kind: str, record: dict, chat_id: str | None) -> dict:
     """Queue a person. Money and cargo release wait for that approval, then the rail."""
     commercial = record.get("commercial") or {}
     summary = f"{kind} {commercial.get('quote_reference_id') or ''} {commercial.get('vendor_name') or ''}".strip()
-    review = queue_human_review(kind, summary, chat_id, "Waiting for a person to approve.", record)
+    company_id = record.get("company_id") or (record.get("business") or {}).get("id")
+    review = queue_human_review(kind, summary, chat_id, "Waiting for a person to approve.", record, company_id=company_id)
     return {
         "done": False,
         "review_id": review["id"],
@@ -53,7 +54,7 @@ def execute_approved(row: dict) -> dict:
     raw = row.get("payload")
     if not raw:
         return {"done": False, "note": "Approved by a person, but the quote was not stored, so nothing was sent."}
-    record = json.loads(raw)
+    record = json.loads(raw) if isinstance(raw, str) else raw
     try:
         result = _post(url, {"kind": kind, "chat_id": row.get("chat_id"), "record": record})
     except Exception as exc:  # noqa: BLE001 — approval must not become a fake payment

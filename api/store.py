@@ -249,6 +249,15 @@ def user_by_api_key(api_key: str | None) -> dict | None:
     return dict(row) if row else None
 
 
+def user_by_company(code: str) -> dict | None:
+    if using_cloud():
+        from api.cloud_store import user_by_company as cloud_lookup
+        return cloud_lookup(code)
+    with connect() as conn:
+        row = conn.execute("SELECT users.* FROM users JOIN companies ON companies.user_id = users.id WHERE companies.code = ?", (code,)).fetchone()
+    return dict(row) if row else None
+
+
 def public_user(user: dict) -> dict:
     return {
         "id": user["id"],
@@ -478,6 +487,9 @@ def link_telegram(code: str, chat_id: str) -> dict | None:
     row = conn.execute("SELECT * FROM companies WHERE code = ?", (code.strip(),)).fetchone()
     if row is None:
         return None
+    for other in conn.execute("SELECT code, telegram_chat_ids FROM companies"):
+        if other["code"] != code.strip() and str(chat_id) in json.loads(other["telegram_chat_ids"] or "[]"):
+            raise ValueError("This chat is already linked to another company. Use /unlink before changing companies.")
     chats = json.loads(row["telegram_chat_ids"] or "[]")
     if str(chat_id) not in chats:
         chats.append(str(chat_id))
@@ -486,6 +498,18 @@ def link_telegram(code: str, chat_id: str) -> dict | None:
     updated = dict(conn.execute("SELECT * FROM companies WHERE id = ?", (row["id"],)).fetchone())
     updated["telegram_chat_ids"] = chats
     return updated
+
+
+def unlink_telegram(chat_id: str) -> None:
+    import json
+    if using_cloud():
+        from api.cloud_store import unlink_telegram as cloud_unlink
+        return cloud_unlink(chat_id)
+    with connect() as conn:
+        for row in conn.execute("SELECT id, telegram_chat_ids FROM companies").fetchall():
+            chats = json.loads(row["telegram_chat_ids"] or "[]")
+            if str(chat_id) in chats:
+                conn.execute("UPDATE companies SET telegram_chat_ids = ? WHERE id = ?", (json.dumps([item for item in chats if str(item) != str(chat_id)]), row["id"]))
 
 
 def company_businesses() -> list[dict]:
