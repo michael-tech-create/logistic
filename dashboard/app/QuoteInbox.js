@@ -39,7 +39,7 @@ export default function QuoteInbox({ inbox, shown, visible, error, updatedAt, bu
     {inbox === null ? <Box sx={{ p: 3 }}>
       {error ? <Typography variant="body2">Your inbox could not be loaded. Use Retry to reconnect.</Typography> : <Box role="status" aria-label="Loading quote inbox"><Skeleton height={60} /><Skeleton height={60} /><Skeleton height={60} /></Box>}
     </Box> : !shown.length ? <Box sx={{ px: 3, py: 7, textAlign: "center" }}>
-      <Avatar variant="rounded" sx={{ mx: "auto", mb: 2, bgcolor: "#edf2e8", color: "primary.main", width: 52, height: 52 }}><DescriptionOutlined /></Avatar>
+      <Avatar variant="rounded" sx={{ mx: "auto", mb: 2, bgcolor: "surface.blue", color: "primary.main", width: 52, height: 52 }}><DescriptionOutlined /></Avatar>
       <Typography variant="h2">Your next shipment starts here</Typography>
       <Typography variant="body2" color="text.secondary" sx={{ mt: 1, mb: 3, maxWidth: 370, mx: "auto" }}>Add a carrier quote to see its route, charges, and cash estimate in one place.</Typography>
       <Stack direction="row" justifyContent="center" spacing={1} useFlexGap flexWrap="wrap"><Button variant="contained" onClick={onAdd}>Add your first quote</Button><Button onClick={onConnect}>Connect Telegram</Button></Stack>

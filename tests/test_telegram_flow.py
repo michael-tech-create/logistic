@@ -444,7 +444,7 @@ class TelegramFlowTests(unittest.TestCase):
         with patch.dict(os.environ, {"DASHBOARD_URL": "", "PAYSTACK_CALLBACK_URL": "https://desk.example.test/billing"}):
             self.message("/settings")
         markup = self.send.call_args.args[2]
-        self.assertEqual(markup["inline_keyboard"][0][0]["url"], "https://desk.example.test/#settings")
+        self.assertEqual(markup["inline_keyboard"][0][0]["url"], "https://desk.example.test/desk#settings")
 
     def test_unrecognized_conversation_is_not_billed_as_a_quote(self):
         self.message("What can this service do for my business?")

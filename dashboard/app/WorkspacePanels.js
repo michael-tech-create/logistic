@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { Alert, Box, Button, Chip, Divider, IconButton, MenuItem, Paper, Stack, TextField, Typography } from "@mui/material";
 import { ArrowForward, CheckCircleOutline, ContentCopy, Refresh } from "@mui/icons-material";
-import { money, request } from "./workflow.mjs";
+import { money, request, reviewStatusOf } from "./workflow.mjs";
 
 export const panel = { p: { xs: 2, md: 3 }, border: 1, borderColor: "divider" };
 export function Heading({ title, description, action }) {
@@ -12,26 +12,33 @@ export function Heading({ title, description, action }) {
 
 export function Approvals({ reviews, error, refresh, busy, confirm, token, notify }) {
   const pending = (reviews || []).filter((row) => row.status === "pending");
-  function decide(row, status) {
-    confirm({ title: status === "approved" ? "Approve this request?" : "Reject this request?", description: `${row.summary}. ${status === "approved" && ["pay", "clear"].includes(row.kind) ? "This submits the stored quote to your configured payment or customs provider. Confirm the quote and recipient details before continuing." : "This records your decision on the request."}`, label: status === "approved" ? "Confirm approval" : "Reject request", danger: status === "rejected", action: async () => {
-      const result = await request(token, `/v1/reviews/${row.id}`, { method: "POST", body: JSON.stringify({ status }) });
-      await refresh(); notify(result.execution?.note || result.execution_note || `Request ${result.status}.`);
-    } });
+  const decided = (reviews || []).filter((row) => row.status !== "pending");
+  function decide(row, status, send = false) {
+    const approval = status === "approved";
+    confirm({
+      title: send ? "Send this approved request?" : approval ? "Approve this request?" : "Reject this request?",
+      description: `${row.summary}. ${send ? "This sends the stored quote to your connected provider. Confirm the quote and recipient details before continuing." : approval && ["pay", "clear"].includes(row.kind) ? "Your approval is saved even if no provider is connected. If a provider is connected, this also submits the request. Check the quote and recipient details first." : "This records your decision on the request."}`,
+      label: send ? "Send to provider" : approval ? "Confirm approval" : "Reject request", danger: !approval,
+      action: async () => {
+        const result = await request(token, `/v1/reviews/${row.id}${send ? "/execute" : ""}`, { method: "POST", ...(send ? {} : { body: JSON.stringify({ status }) }) });
+        await refresh(); notify(result.execution?.note || result.execution_note || `Request ${result.status}.`);
+      },
+    });
   }
   function payloadOf(row) { try { return typeof row.payload === "string" ? JSON.parse(row.payload) : row.payload; } catch { return null; } }
   return <Stack spacing={3}>
-    <Alert severity="info">Checking a quote and approving a payment are separate steps. Approval here can submit a payment or clearance request to your configured provider.</Alert>
+    <Alert severity="info">Human approval and provider submission are separate statuses. If no payment or customs provider is connected, your approval is saved and nothing is sent.</Alert>
     <Paper sx={panel}><Heading title="Requests awaiting a decision" description="Check the stored details before you approve or reject a request." action={<Button startIcon={<Refresh />} onClick={refresh} disabled={!!busy}>Refresh</Button>} />
       {error && <Alert severity="error" sx={{ mb: 2 }} action={<Button color="inherit" onClick={refresh}>Retry</Button>}>{error}</Alert>}
-      {reviews === null ? <Typography role="status">{error ? "Requests could not be loaded." : "Loading requests…"}</Typography> : !pending.length ? <Box sx={{ py: 5, textAlign: "center" }}><CheckCircleOutline sx={{ fontSize: 36, color: "success.main", mb: 1.5 }} /><Typography variant="h2">You’re all caught up</Typography><Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>No requests in the recent review queue are waiting for a decision.</Typography></Box> : <Stack spacing={2}>{pending.map((row) => { const payload = payloadOf(row); return <Paper key={row.id} variant="outlined" sx={{ p: 2.5 }}>
+      {reviews === null ? <Typography role="status">{error ? "Requests could not be loaded." : "Loading requests…"}</Typography> : !pending.length ? <Box sx={{ py: 5, textAlign: "center" }}><CheckCircleOutline sx={{ fontSize: 36, color: "success.main", mb: 1.5 }} /><Typography variant="h2">No decisions waiting</Typography><Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>Check request history below for approved requests that still need a provider or verification.</Typography></Box> : <Stack spacing={2}>{pending.map((row) => { const payload = payloadOf(row); return <Paper key={row.id} variant="outlined" sx={{ p: 2.5 }}>
         <Stack direction="row" gap={1} alignItems="center" sx={{ mb: 1 }}><Chip size="small" label={row.kind === "pay" ? "Payment" : row.kind === "clear" ? "Cargo clearance" : row.kind} variant="outlined" /><Typography variant="caption" color="text.secondary">Request #{row.id}</Typography></Stack>
         <Typography variant="h3">{row.summary}</Typography><Typography variant="body2" color="text.secondary" sx={{ my: 1 }}>{row.detail}</Typography>
-        {payload && <Box sx={{ p: 2, mb: 2, bgcolor: "#f5f7f2", borderRadius: 1 }}><Typography variant="body2">{payload.commercial?.vendor_name || "Vendor not provided"} · {money(payload.commercial?.currency, payload.commercial?.total_amount)}</Typography><Typography variant="body2" color="text.secondary">{payload.movement?.origin?.location_name || "Origin not provided"} → {payload.movement?.destination?.location_name || "Destination not provided"}</Typography><Typography variant="caption" color="text.secondary">Reference: {payload.commercial?.quote_reference_id || "Not provided"}</Typography></Box>}
+        {payload && <Box sx={{ p: 2, mb: 2, bgcolor: "surface.soft", borderRadius: 1 }}><Typography variant="body2">{payload.commercial?.vendor_name || "Vendor not provided"} · {money(payload.commercial?.currency, payload.commercial?.total_amount)}</Typography><Typography variant="body2" color="text.secondary">{payload.movement?.origin?.location_name || "Origin not provided"} → {payload.movement?.destination?.location_name || "Destination not provided"}</Typography><Typography variant="caption" color="text.secondary">Reference: {payload.commercial?.quote_reference_id || "Not provided"}</Typography></Box>}
         {row.execution_note && <Alert severity="warning" sx={{ mb: 2 }}>{row.execution_note}</Alert>}
         <Stack direction="row" gap={1}><Button variant="contained" disabled={!!busy} onClick={() => decide(row, "approved")}>Review approval</Button><Button color="error" disabled={!!busy} onClick={() => decide(row, "rejected")}>Reject</Button></Stack>
       </Paper>; })}</Stack>}
     </Paper>
-    {!!reviews?.some((row) => row.status !== "pending") && <Paper sx={panel}><Heading title="Recent decisions" /><Stack divider={<Divider />} spacing={1.5}>{reviews.filter((row) => row.status !== "pending").map((row) => <Stack key={row.id} direction={{ xs: "column", sm: "row" }} gap={1} justifyContent="space-between"><Box><Typography variant="body2">#{row.id} · {row.summary}</Typography>{row.execution_note && <Typography variant="caption" color="text.secondary">{row.execution_note}</Typography>}</Box><Chip size="small" label={row.status} variant="outlined" color={row.status === "rejected" ? "default" : "success"} /></Stack>)}</Stack></Paper>}
+    {!!decided.length && <Paper sx={panel}><Heading title="Request history" description="Approval records your decision. Submitted means the provider accepted the request; check there for the final outcome." /><Stack divider={<Divider />} spacing={2}>{decided.map((row) => { const state = reviewStatusOf(row); return <Stack key={row.id} direction={{ xs: "column", sm: "row" }} gap={2} justifyContent="space-between"><Box sx={{ flex: 1 }}><Typography variant="body2" sx={{ mb: 1 }}>#{row.id} · {row.summary}</Typography><Chip size="small" label={state.label} variant="outlined" color={state.color} />{row.execution_note && <Typography variant="body2" color="text.secondary" sx={{ mt: 1, overflowWrap: "anywhere" }}>{row.execution_note}</Typography>}</Box>{state.canSend && <Button variant="outlined" sx={{ alignSelf: "flex-start", whiteSpace: "nowrap" }} disabled={!!busy} onClick={() => decide(row, "approved", true)}>Send to provider</Button>}</Stack>; })}</Stack></Paper>}
   </Stack>;
 }
 
@@ -40,7 +47,7 @@ export function Connections({ token, company, perform, busy, notify, onQuotes, o
   return <Stack spacing={3}>
     <Paper sx={panel}><Heading title="Telegram intake" description="Link your chat so quotes are filed under your company." /><Stack spacing={2.5}>
       <Typography variant="body2">1. Open your company’s freight quote bot in Telegram.</Typography>
-      <Box><Typography variant="body2" sx={{ mb: 1 }}>2. Copy this command and send it in the bot chat.</Typography><Stack direction="row" gap={1} alignItems="center"><Box component="code" sx={{ p: 1.5, bgcolor: "#f1f4ed", borderRadius: 1, overflowWrap: "anywhere", flex: 1 }}>{company?.link_command || "Loading your link command…"}</Box><IconButton aria-label="Copy Telegram link command" disabled={!company?.link_command || !!busy} onClick={() => perform("copy-link", async () => { await navigator.clipboard.writeText(company.link_command); notify("Link command copied. Paste it into your Telegram bot chat."); })}><ContentCopy fontSize="small" /></IconButton></Stack></Box>
+      <Box><Typography variant="body2" sx={{ mb: 1 }}>2. Copy this command and send it in the bot chat.</Typography><Stack direction="row" gap={1} alignItems="center"><Box component="code" sx={{ p: 1.5, bgcolor: "surface.soft", borderRadius: 1, overflowWrap: "anywhere", flex: 1 }}>{company?.link_command || "Loading your link command…"}</Box><IconButton aria-label="Copy Telegram link command" disabled={!company?.link_command || !!busy} onClick={() => perform("copy-link", async () => { await navigator.clipboard.writeText(company.link_command); notify("Link command copied. Paste it into your Telegram bot chat."); })}><ContentCopy fontSize="small" /></IconButton></Stack></Box>
       <Typography variant="body2">3. Wait for the bot’s link confirmation, then send text, a voice note, a photo, or a PDF.</Typography>
       <Typography variant="body2" color="text.secondary">Quotes appear in your inbox after processing. A copied command alone does not confirm a connection.</Typography><Button sx={{ alignSelf: "flex-start" }} onClick={onQuotes} endIcon={<ArrowForward />}>Go to quote inbox</Button>
     </Stack></Paper>

@@ -4,6 +4,7 @@ import { Suspense, useCallback, useEffect, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { Alert, Button, CircularProgress, Container, Paper, Stack, Typography } from "@mui/material";
 import { request } from "../workflow.mjs";
+import Brand from "../Brand";
 
 function BillingReturn() {
   const params = useSearchParams();
@@ -22,10 +23,10 @@ function BillingReturn() {
   }, [reference]);
   useEffect(() => { verify(); }, [verify]);
   return <Container component="main" maxWidth="sm" sx={{ py: 8 }}><Paper variant="outlined" sx={{ p: 4 }}><Stack spacing={3}>
-    <Typography variant="overline" color="text.secondary">CLEARING DESK / SUBSCRIPTION</Typography><Typography variant="h1" sx={{ fontSize: 28 }}>{state === "checking" ? "Confirming your payment" : state === "success" ? "You’re ready to continue" : "Payment needs a check"}</Typography>
+    <Brand /><Typography variant="overline" color="text.secondary">SUBSCRIPTION</Typography><Typography variant="h1" sx={{ fontSize: 28 }}>{state === "checking" ? "Confirming your payment" : state === "success" ? "You’re ready to continue" : "Payment needs a check"}</Typography>
     {state === "checking" ? <Stack direction="row" spacing={2} alignItems="center" role="status"><CircularProgress size={22} /><Typography variant="body2">Checking the payment with Paystack. Please wait.</Typography></Stack> : <Alert severity={state === "success" ? "success" : "error"}>{message}</Alert>}
     <Typography variant="body2" color="text.secondary" sx={{ overflowWrap: "anywhere" }}>Reference: {reference || "Not provided"}</Typography>
-    <Stack direction="row" spacing={1}>{state === "error" && reference && <Button variant="outlined" onClick={verify}>Retry confirmation</Button>}<Button variant="contained" href={state === "success" ? "/#quotes" : "/#settings"}>{state === "success" ? "Return to quotes" : "Back to workspace"}</Button></Stack>
+    <Stack direction="row" spacing={1}>{state === "error" && reference && <Button variant="outlined" onClick={verify}>Retry confirmation</Button>}<Button variant="contained" href={state === "success" ? "/desk#quotes" : "/desk#settings"}>{state === "success" ? "Return to quotes" : "Back to workspace"}</Button></Stack>
   </Stack></Paper></Container>;
 }
 

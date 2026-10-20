@@ -20,6 +20,16 @@ export function statusOf(record) {
   return { key: "pending", label: "To check", color: "info" };
 }
 
+export function reviewStatusOf(row) {
+  if (row.status === "approved" && ["pay", "clear"].includes(row.kind)) return { label: "Approved · Not sent", color: "warning", canSend: true };
+  if (row.status === "executed") return { label: "Submitted to provider", color: "success" };
+  if (row.status === "processing") return { label: "Submission started · Verify outcome", color: "warning" };
+  if (row.status === "execution_uncertain") return { label: "Approved · Verify with provider", color: "warning" };
+  if (row.status === "rejected") return { label: "Rejected", color: "default" };
+  if (row.status === "approved") return { label: "Approved", color: "success" };
+  return { label: "Awaiting your decision", color: "info" };
+}
+
 export function mergeRecords(live, pack) {
   const seen = new Set();
   return [...live, ...pack].filter((record) => {
@@ -64,7 +74,9 @@ export async function request(token, path, options = {}) {
     });
     if (!response.ok) {
       const payload = await response.json().catch(() => ({}));
-      const detail = typeof payload.detail === "string" ? payload.detail : "The request could not be completed. Please try again.";
+      const detail = typeof payload.detail === "string" ? payload.detail : response.status >= 500
+        ? "The desk API is unavailable. If you’re running locally, restart with npm run dev in dashboard to start both the API and website. Otherwise, try again shortly."
+        : "The request could not be completed. Please try again.";
       const error = new Error(response.status === 401 && token ? "Your session has expired. Sign out and sign in again." : detail);
       error.status = response.status;
       throw error;

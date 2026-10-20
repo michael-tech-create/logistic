@@ -1,4 +1,4 @@
-"""Pay a party or file a cargo release only when a rail answers. Otherwise queue a person."""
+"""Keep human authorization separate from submission to a configured provider."""
 
 from __future__ import annotations
 
@@ -50,13 +50,21 @@ def execute_approved(row: dict) -> dict:
         return {"done": True, "note": "Approved. This review does not send money or clear cargo."}
     url = os.environ.get("PAYOUT_URL") if kind == "pay" else os.environ.get("CUSTOMS_CLEAR_URL")
     if not url:
-        return {"done": False, "note": "Approved by a person, but no rail is configured, so nothing was sent."}
+        provider = "payment" if kind == "pay" else "customs"
+        return {"done": False, "status": "approved", "note": f"Approval saved. No {provider} provider is connected, so nothing was sent. Ask your administrator to connect the provider, then use Send to provider."}
     raw = row.get("payload")
     if not raw:
-        return {"done": False, "note": "Approved by a person, but the quote was not stored, so nothing was sent."}
-    record = json.loads(raw) if isinstance(raw, str) else raw
+        return {"done": False, "status": "approved", "note": "Approval saved, but the stored quote is missing. Nothing was sent. Ask your administrator to restore the quote before sending."}
+    try:
+        record = json.loads(raw) if isinstance(raw, str) else raw
+        if not isinstance(record, dict):
+            raise ValueError("Expected a quote object")
+    except (TypeError, ValueError):
+        return {"done": False, "status": "approved", "note": "Approval saved, but the stored quote cannot be read. Nothing was sent. Ask your administrator to repair the quote before sending."}
     try:
         result = _post(url, {"kind": kind, "chat_id": row.get("chat_id"), "record": record})
     except Exception as exc:  # noqa: BLE001 — approval must not become a fake payment
-        return {"done": False, "note": f"The rail refused the request: {exc}"[:300]}
-    return {"done": True, "note": result.get("note") or f"{kind} was accepted by the rail.", "rail": result}
+        # A timeout can happen after a provider accepts a payment. Never retry it
+        # automatically or put it back in the human approval queue.
+        return {"done": False, "status": "execution_uncertain", "note": f"Approval saved. The provider did not confirm the result. Check with the provider before taking further action; do not submit this request again. Details: {exc}"[:500]}
+    return {"done": True, "status": "executed", "note": result.get("note") or "Request accepted by the provider. Check the provider for its final outcome.", "rail": result}

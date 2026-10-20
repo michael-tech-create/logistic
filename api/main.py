@@ -18,7 +18,7 @@ from urllib.parse import urlparse
 from fastapi import BackgroundTasks, FastAPI, File, Header, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -75,6 +75,15 @@ class RegisterBody(BaseModel):
 class LoginBody(BaseModel):
     email: str
     password: str
+
+
+class ForgotPasswordBody(BaseModel):
+    email: str = Field(min_length=3, max_length=254)
+
+
+class ResetPasswordBody(BaseModel):
+    token: str = Field(min_length=1, max_length=128)
+    password: str = Field(min_length=1, max_length=128)
 
 
 class ParseBody(BaseModel):
@@ -411,6 +420,34 @@ def me(authorization: str | None = Header(default=None), x_api_key: str | None =
     return public_user(current_user(authorization, x_api_key))
 
 
+@app.post("/v1/auth/forgot-password")
+def auth_forgot_password(body: ForgotPasswordBody, background_tasks: BackgroundTasks):
+    from api.password_reset import RESET_MESSAGE, ensure_email_ready, send_reset_link
+
+    email = body.email.strip().lower()
+    if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email):
+        raise HTTPException(400, "Enter a valid email address.")
+    try:
+        page_url = ensure_email_ready()
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc)) from exc
+    background_tasks.add_task(send_reset_link, email, page_url)
+    return {"message": RESET_MESSAGE}
+
+
+@app.post("/v1/auth/reset-password")
+def auth_reset_password(body: ResetPasswordBody):
+    from api.password_reset import reset_password
+
+    try:
+        reset_password(body.token, body.password)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc)) from exc
+    return {"message": "Your password has been reset. Sign in with your new password."}
+
+
 _extract_cache: dict[str, dict] = {}
 
 
@@ -636,10 +673,8 @@ def reviews(authorization: str | None = Header(default=None), x_api_key: str | N
 
 @app.post("/v1/reviews/{review_id}")
 def review_decision(review_id: int, body: ReviewBody, authorization: str | None = Header(default=None), x_api_key: str | None = Header(default=None)):
-    current_user(authorization, x_api_key)
     if body.status not in {"approved", "rejected"}:
         raise HTTPException(400, "Status must be approved or rejected.")
-    from actions import execute_approved
     from api.store import get_review
 
     company_id = ensure_company(current_user(authorization, x_api_key))["code"]
@@ -649,17 +684,41 @@ def review_decision(review_id: int, body: ReviewBody, authorization: str | None 
     if current.get("status") != "pending":
         raise HTTPException(409, "This review has already been handled. Refresh the approvals list.")
     if body.status == "approved" and current.get("kind") in {"pay", "clear"}:
-        result = execute_approved(current)
-        status = "executed" if result["done"] else "pending"
-        row = resolve_review(review_id, status, result["note"], company_id)
-        return {**row, "execution": result}
+        return _submit_review(current, company_id, "pending")
     try:
-        row = resolve_review(review_id, body.status, None, company_id)
+        row = resolve_review(review_id, body.status, None, company_id, expected_status="pending")
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     if row is None:
-        raise HTTPException(404, "Review not found.")
+        raise HTTPException(409, "This review has already been handled. Refresh the approvals list.")
     return row
+
+
+def _submit_review(current: dict, company_id: str, expected_status: str):
+    from actions import execute_approved
+
+    claimed = resolve_review(current["id"], "processing", "Approved. Submission started; check with the provider if no outcome appears. Do not submit again.", company_id, expected_status=expected_status)
+    if claimed is None:
+        raise HTTPException(409, "This request has already been handled. Refresh the approvals list.")
+    result = execute_approved(claimed)
+    status = "executed" if result["done"] else result.get("status", "execution_uncertain")
+    row = resolve_review(current["id"], status, result["note"], company_id, expected_status="processing")
+    if row is None:
+        raise HTTPException(409, "Submission status changed. Refresh the approvals list and check with the provider.")
+    return {**row, "execution": result}
+
+
+@app.post("/v1/reviews/{review_id}/execute")
+def review_execute(review_id: int, authorization: str | None = Header(default=None), x_api_key: str | None = Header(default=None)):
+    from api.store import get_review
+
+    company_id = ensure_company(current_user(authorization, x_api_key))["code"]
+    current = get_review(review_id, company_id)
+    if current is None:
+        raise HTTPException(404, "Review not found.")
+    if current.get("status") != "approved" or current.get("kind") not in {"pay", "clear"}:
+        raise HTTPException(409, "Only an approved request that has not been submitted can be sent. Refresh the approvals list.")
+    return _submit_review(current, company_id, "approved")
 
 
 @app.post("/v1/whatsapp/send")

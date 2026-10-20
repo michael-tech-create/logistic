@@ -58,7 +58,7 @@ TELEGRAM_BOT_TOKEN=...
 DASHBOARD_URL=https://your-clearing-desk.example
 ```
 
-`DASHBOARD_URL` is optional. The bot can also derive the public desk origin from a `PAYSTACK_CALLBACK_URL` ending in `/billing`; it does not turn a localhost callback into a Telegram link.
+`DASHBOARD_URL` is optional. The bot can also derive the public desk origin from a `PAYSTACK_CALLBACK_URL` ending in `/billing`; it does not turn a localhost callback into a Telegram link. A bare site origin opens `/desk`, while an explicitly configured path is retained.
 
 For webhook delivery, set `TELEGRAM_DELIVERY_MODE=webhook` and a strong `TELEGRAM_WEBHOOK_SECRET`. Register your public `/telegram/webhook` endpoint with Telegram using that same `secret_token`. Do not run a poller against a registered webhook. The app deliberately does not delete or register a webhook on your behalf.
 
@@ -73,7 +73,7 @@ python telegram_diagnostics.py --live
 
 The first checks configuration without printing secrets. `--live` additionally calls only `getMe` and `getWebhookInfo`; neither sends chat messages. It can identify a webhook/polling conflict, but does not prove the deployed intake process is running.
 
-Payment execution still requires a real `PAYOUT_URL`; customs execution requires `CUSTOMS_CLEAR_URL`. Requests can be queued without those providers, but approval cannot execute them. SMTP and Gemini availability remain dependent on their configured services. The earlier review's remaining server-side payment idempotency and other security findings are separate follow-up work.
+Payment execution still requires a real `PAYOUT_URL`; customs execution requires `CUSTOMS_CLEAR_URL`. Requests can be queued without those providers, but approval cannot execute them. SMTP and Gemini availability remain dependent on their configured services. Approval and submission now have separate states: `pending` awaits a human decision, `approved` means approved but not sent, `processing` means submission started, `executed` means the provider accepted the request, and `execution_uncertain` requires verification with the provider. A conditional database update claims each submission before calling the provider. Uncertain or interrupted submissions cannot be retried from the desk; verify the outcome before an administrator reconciles the record. Provider-side idempotency and settlement confirmation still depend on the integration.
 
 ## Verification
 

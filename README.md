@@ -80,21 +80,19 @@ cp .env.example .env
 
 Fill `.env` with the keys you use: Gemini, Telegram, mail, Paystack, and, if you want remote storage, Supabase. Copy `businesses.example.json` to `businesses.json` and set the company name, home country, notify address, and inbound addresses.
 
-Three processes:
+Start the website and API together:
 
 ```bash
-# API
-uvicorn api.main:app --reload --port 8000
-
-# Desk, from dashboard/
+cd dashboard
 npm install
 npm run dev
-
-# Telegram and email intake. Run one copy only.
-python automate.py
 ```
 
-Open the desk at http://localhost:3000 and the API docs at http://127.0.0.1:8000/docs. Health is `GET /health`.
+`npm run dev` starts the Python API on `127.0.0.1:8000`, waits until it is ready, then starts Next.js. It automatically uses the project’s `.venv` Python. If the API is already running, it reuses it; if `API_PROXY_URL` points at a remote host, it starts only the website. Ctrl+C stops the processes started by this command. Restart an older `npm run dev` process after updating these scripts.
+
+Open the homepage at http://localhost:3000, the desk at http://localhost:3000/desk, and API docs at http://127.0.0.1:8000/docs. Health is `GET /health`. Starting just the website without an API causes connection-refused errors on sign-in.
+
+To manage the services separately, run `uvicorn api.main:app --reload --port 8000` from the project root and `npm run dev:web` from `dashboard/`. Telegram/email intake is separate: run `python automate.py` from the root when needed, with only one copy running. The development launcher does not start Telegram or email intake.
 
 The terminal watcher reads the live PTML schedule:
 
@@ -107,11 +105,15 @@ By default it opens `https://www.ptml-nigeria.com/`, takes the first vessel row,
 
 ## Supabase
 
+The login page includes **Forgot password?** with expiring email reset links. For an existing Supabase deployment, apply [`supabase/password_reset.sql`](supabase/password_reset.sql), configure outbound SMTP and the public `PASSWORD_RESET_URL`, and redeploy the API and dashboard. SQLite updates automatically. Setup and verification are in [docs/PASSWORD-RESET.md](docs/PASSWORD-RESET.md).
+
+For Paystack checkout errors such as `401 invalid_Key`, update `PAYSTACK_SECRET_KEY` on the Python API service, then restart it. Use `python paystack_diagnostics.py --live` for a read-only credential check. See [docs/PAYSTACK.md](docs/PAYSTACK.md).
+
 `SUPABASE_URL` must be the project HTTP address, `https://<project-ref>.supabase.co`, with the service-role or secret key in `SUPABASE_SERVICE_ROLE_KEY`. Run `supabase/schema.sql` in the Supabase SQL editor before the first sync. Each saved quote starts at status `pending`.
 
 ## Pay, clearance, and human review
 
-On a checked quote, “pay the trucker” or `/pay` opens a confirmation for a payment review; “clear the cargo” or `/clear` opens a clearance review. Confirmation queues a person and replies with the review number. Only approval on the desk attempts `PAYOUT_URL` or `CUSTOMS_CLEAR_URL`. If a provider is missing or refuses the call, the request stays pending and no payment or clearance is claimed. The **Approvals** section lists requests and recent decisions. Approve or reject through `POST /v1/reviews/{id}` with a status of `approved` or `rejected`.
+On a checked quote, “pay the trucker” or `/pay` opens a confirmation for a payment review; “clear the cargo” or `/clear` opens a clearance review. Confirmation queues a person and replies with the review number. Only approval on the desk attempts `PAYOUT_URL` or `CUSTOMS_CLEAR_URL`. Human approval is saved as `approved` when no provider is connected; nothing is sent. After connecting the provider, use **Send to provider** or `POST /v1/reviews/{id}/execute`. A provider submission is claimed atomically before the call, preventing concurrent approvals from sending it twice. An unconfirmed provider response becomes `execution_uncertain`; verify with the provider before any further action. Successful submission becomes `executed` (provider accepted, not proof of final settlement or clearance). A process interrupted during submission stays `processing` for manual verification rather than automatic resubmission. The **Approvals** section lists requests and recent decisions. Approve or reject through `POST /v1/reviews/{id}` with a status of `approved` or `rejected`.
 
 ## Honest limits
 
@@ -119,9 +121,11 @@ On a checked quote, “pay the trucker” or `/pay` opens a confirmation for a p
 - Port risk is a desk setting: normal ₦350,000, elevated ₦900,000, severe ₦1,800,000. It is not a live congestion index.
 - The duty table is an estimate on the all-in naira figure. It is not an NCS assessment.
 - Duty finance, escrow, and payout plans on the desk are ledger rows. Paystack charges only the ₦15,000 or ₦50,000 subscription. No lender disburses funds.
-- The bot cannot pay a person or clear cargo until `PAYOUT_URL` and `CUSTOMS_CLEAR_URL` point at a real bank and a real customs system. Until then every such request waits for a person.
+- The bot cannot pay a person or clear cargo until `PAYOUT_URL` and `CUSTOMS_CLEAR_URL` point at a real bank and a real customs system. Requests require human approval; without a provider, that approval is retained and nothing is sent.
 
 ## Desk workflow
+
+The public homepage is at `/`, with the user-supplied robot hero, a workflow example, plans, and FAQs. **Start free** opens `/desk?mode=register`; **Sign in** opens `/desk`. Old root links such as `/#approvals` redirect to the matching desk section. Telegram buttons and billing return links open `/desk` directly.
 
 The dashboard in `dashboard/` is organized into **Quotes**, **Approvals**, **Connections**, and **Settings**.
 
@@ -163,7 +167,7 @@ The clearing desk is Next.js in `dashboard/`. The API and the Telegram/email loo
 1. Push this repo to GitHub.
 2. Import it in Vercel. Set the root directory to `dashboard/`.
 3. Set `API_PROXY_URL` to the public API origin, for example `https://quote-desk-api.onrender.com`. No trailing slash.
-4. Leave `NEXT_PUBLIC_API_URL` unset. The desk then calls `/v1/...` on its own host, and `dashboard/next.config.js` proxies that to `API_PROXY_URL`.
+4. Set `NEXT_PUBLIC_SITE_URL` to the public website origin for absolute Open Graph image URLs. Leave `NEXT_PUBLIC_API_URL` unset. The desk then calls `/v1/...` on its own host, and `dashboard/next.config.js` proxies that to `API_PROXY_URL`.
 5. Set `PAYSTACK_CALLBACK_URL` on the API to `https://<your-vercel-host>/billing`.
 
 The desk does not read Supabase. `NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_ANON_KEY` are not used.

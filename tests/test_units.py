@@ -209,12 +209,13 @@ class ActionTests(unittest.TestCase):
         self.assertFalse(result["done"])
         self.assertTrue(result["review_id"])
 
-    def test_clear_down_rail_stays_pending(self):
+    def test_unconfirmed_provider_requires_verification(self):
         queued = attempt("clear", {"commercial": {"vendor_name": "GIG"}}, "1")
         with patch.dict(os.environ, {"CUSTOMS_CLEAR_URL": "http://127.0.0.1:9/clear"}):
             result = execute_approved(get_review(queued["review_id"]))
         self.assertFalse(result["done"])
-        self.assertIn("refused", result["note"])
+        self.assertEqual(result["status"], "execution_uncertain")
+        self.assertIn("Check with the provider", result["note"])
 
     def test_approved_pay_calls_rail(self):
         queued = attempt("pay", {"commercial": {"vendor_name": "GIG", "quote_reference_id": "Q9"}}, "1")
@@ -275,11 +276,11 @@ class StoreTests(unittest.TestCase):
 
 class BillingTests(unittest.TestCase):
     def test_signature(self):
-        os.environ["PAYSTACK_SECRET_KEY"] = "unit-secret"
+        self.enterContext(patch.dict(os.environ, {"PAYSTACK_SECRET_KEY": "sk_test_unitsecret"}))
         import hashlib
         import hmac
         body = b'{"event":"charge.success"}'
-        good = hmac.new(b"unit-secret", body, hashlib.sha512).hexdigest()
+        good = hmac.new(b"sk_test_unitsecret", body, hashlib.sha512).hexdigest()
         self.assertTrue(verify_signature(body, good))
         self.assertFalse(verify_signature(body, "nope"))
 

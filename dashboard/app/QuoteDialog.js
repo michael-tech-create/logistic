@@ -57,7 +57,7 @@ export default function QuoteDialog({ token, record, onClose, onUpdate, onCorrec
             <Chip label={status.label} color={status.color} size="small" variant="outlined" />
             <Typography variant="caption" color="text.secondary">{checked ? `Checked by ${record.desk_review.reviewed_by}` : "Check against the original carrier quote"}</Typography>
           </Stack>
-          <Box sx={{ display: "grid", gridTemplateColumns: { xs: "1fr 1fr", sm: "repeat(4, 1fr)" }, gap: 2, p: 2.5, bgcolor: "#f5f7f2", borderRadius: 2 }}>
+          <Box sx={{ display: "grid", gridTemplateColumns: { xs: "1fr 1fr", sm: "repeat(4, 1fr)" }, gap: 2, p: 2.5, bgcolor: "surface.soft", borderRadius: 2 }}>
             <Detail label="Origin">{movement.origin?.location_name}</Detail>
             <Detail label="Destination">{movement.destination?.location_name}</Detail>
             <Detail label="Mode">{movement.mode}</Detail>

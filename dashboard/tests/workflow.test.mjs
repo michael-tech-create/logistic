@@ -1,8 +1,16 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { filterRecords, mergeRecords, missingDetails, money, request, statusOf, validateFiles } from "../app/workflow.mjs";
+import { filterRecords, mergeRecords, missingDetails, money, request, reviewStatusOf, statusOf, validateFiles } from "../app/workflow.mjs";
 
 const quote = (id, currency = "USD") => ({ record_id: id, commercial: { vendor_name: "Carrier", quote_reference_id: "REPEATED", currency, total_amount: 100 }, movement: { origin: { location_name: "Shanghai" }, destination: { location_name: "Lagos" } }, line_items: [{ description: "Freight", amount: 100 }] });
+
+test("only an approved, unsent provider request offers submission", () => {
+  assert.equal(reviewStatusOf({ kind: "pay", status: "approved" }).canSend, true);
+  for (const status of ["pending", "executed", "processing", "execution_uncertain", "rejected"]) assert.ok(!reviewStatusOf({ kind: "pay", status }).canSend);
+  assert.ok(!reviewStatusOf({ kind: "terminal", status: "approved" }).canSend);
+  assert.match(reviewStatusOf({ kind: "clear", status: "approved" }).label, /Not sent/);
+  assert.match(reviewStatusOf({ status: "executed" }).label, /Submitted/);
+});
 
 test("same reference across different quotes does not hide shipments", () => {
   assert.equal(mergeRecords([quote("a"), quote("b")], [quote("a"), quote("c")]).length, 3);
@@ -41,6 +49,12 @@ test("network failure provides a retry message instead of leaving a silent spinn
   const original = globalThis.fetch;
   globalThis.fetch = async () => { throw new TypeError("Failed to fetch"); };
   try { await assert.rejects(request("fixture", "/v1/inbox"), /Check your connection/); }
+  finally { globalThis.fetch = original; }
+});
+test("a failed API proxy explains recovery rather than reporting a generic sign-in error", async () => {
+  const original = globalThis.fetch;
+  globalThis.fetch = async () => new Response("Proxy unavailable", { status: 500 });
+  try { await assert.rejects(request("", "/v1/auth/login"), /desk API is unavailable/); }
   finally { globalThis.fetch = original; }
 });
 test("server errors and quota status are preserved for recovery", async () => {

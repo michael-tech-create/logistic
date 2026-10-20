@@ -88,6 +88,25 @@ def login(email: str, password: str) -> dict:
     return public
 
 
+def issue_password_reset(email: str, token_hash: str, expires_at: int, now: int) -> bool:
+    path = (f"users?email=eq.{urllib_quote(email.lower().strip())}"
+            f"&or=(reset_requested_at.is.null,reset_requested_at.lte.{now - 60})&select=id")
+    return _patch(path, {"reset_token_hash": token_hash, "reset_expires_at": expires_at, "reset_requested_at": now}) is not None
+
+
+def ensure_password_reset_ready() -> None:
+    try:
+        _request("GET", "users?select=reset_token_hash,reset_expires_at,reset_requested_at&limit=0", None)
+    except Exception as exc:
+        raise RuntimeError("Password recovery is not available yet. Please contact your workspace administrator.") from exc
+
+
+def complete_password_reset(token_hash: str, password_hash: str, now: int) -> bool:
+    # A database function keeps token consumption, password update, and session
+    # revocation atomic even when multiple API processes receive the same link.
+    return _request("POST", "rpc/complete_password_reset", {"p_token_hash": token_hash, "p_password_hash": password_hash}) is True
+
+
 def user_by_token(token: str | None) -> dict | None:
     if not token:
         return None
@@ -274,12 +293,14 @@ def get_review(review_id: int, company_id: str | None = None) -> dict | None:
     return _one(path)
 
 
-def resolve_review(review_id: int, status: str, execution_note: str | None = None, company_id: str | None = None) -> dict | None:
-    if status not in {"approved", "rejected", "executed", "pending"}:
-        raise ValueError("Status must be approved, rejected, executed, or pending.")
+def resolve_review(review_id: int, status: str, execution_note: str | None = None, company_id: str | None = None, expected_status: str | None = None) -> dict | None:
+    if status not in {"approved", "rejected", "executed", "pending", "processing", "execution_uncertain"}:
+        raise ValueError("Invalid review status.")
     path = f"human_reviews?id=eq.{review_id}"
     if company_id:
         path += f"&company_id=eq.{urllib_quote(company_id)}"
+    if expected_status:
+        path += f"&status=eq.{urllib_quote(expected_status)}"
     return _patch(path, {"status": status, "execution_note": execution_note})
 
 

@@ -67,7 +67,7 @@ export default function IntakeDialog({ token, quota, seed, onClose, onCreated, o
         <Box component="form" id="intake-form" onSubmit={submit}>
           {tab === 0 ? (
             <Box role="tabpanel" id="files-panel" aria-labelledby="source-files">
-              <Box onDragOver={(event) => { event.preventDefault(); if (!busy) setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={(event) => { event.preventDefault(); setDragging(false); if (!busy) choose(event.dataTransfer.files); }} sx={{ border: "2px dashed", borderColor: dragging ? "primary.main" : "#c8d4c9", bgcolor: dragging ? "#edf5ee" : "#f8faf7", borderRadius: 2, textAlign: "center", p: 4 }}>
+              <Box onDragOver={(event) => { event.preventDefault(); if (!busy) setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={(event) => { event.preventDefault(); setDragging(false); if (!busy) choose(event.dataTransfer.files); }} sx={{ border: "2px dashed", borderColor: dragging ? "primary.main" : "surface.blueBorder", bgcolor: dragging ? "surface.blue" : "surface.soft", borderRadius: 2, textAlign: "center", p: 4 }}>
                 <UploadFileOutlined sx={{ color: "primary.main", fontSize: 36, mb: 1 }} />
                 <Typography fontWeight={650}>Drop your carrier quotes here</Typography>
                 <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>PDF or TXT · up to 10 MB per file</Typography>

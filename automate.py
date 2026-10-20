@@ -226,7 +226,11 @@ def _dashboard_url() -> str | None:
         if callback.hostname not in {None, "localhost", "127.0.0.1", "::1"} and callback.path.rstrip("/") == "/billing":
             url = urllib.parse.urlunparse((callback.scheme, callback.netloc, "", "", "", ""))
     parsed = urllib.parse.urlparse(url)
-    return url if parsed.scheme in {"http", "https"} and parsed.netloc else None
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return None
+    # The public homepage now owns '/'; Telegram should open the actual desk.
+    path = parsed.path.rstrip("/") or "/desk"
+    return urllib.parse.urlunparse((parsed.scheme, parsed.netloc, path, "", "", ""))
 
 
 def _menu_keyboard() -> dict:
@@ -572,7 +576,7 @@ def _handle_telegram_message(message: dict) -> None:
         return
     if command in {"/status", "/settings"}:
         if command == "/settings" and _dashboard_url():
-            send_telegram(chat_id, "Manage your company’s parallel rate, port risk, and parse allowance in Settings on the desk.", {"inline_keyboard": [[{"text": "Open workspace settings", "url": f"{_dashboard_url()}/#settings"}], [{"text": "My status", "callback_data": "menu:status"}]]})
+            send_telegram(chat_id, "Manage your company’s parallel rate, port risk, and parse allowance in Settings on the desk.", {"inline_keyboard": [[{"text": "Open workspace settings", "url": f"{_dashboard_url()}#settings"}], [{"text": "My status", "callback_data": "menu:status"}]]})
             return
         _status(chat_id, business)
         return

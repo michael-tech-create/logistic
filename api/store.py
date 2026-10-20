@@ -64,6 +64,10 @@ def connect() -> sqlite3.Connection:
         conn.execute("ALTER TABLE users ADD COLUMN plan_code TEXT DEFAULT 'trial'")
     if "plan_parses" not in columns:
         conn.execute("ALTER TABLE users ADD COLUMN plan_parses INTEGER DEFAULT 5")
+    for name, kind in (("reset_token_hash", "TEXT"), ("reset_expires_at", "INTEGER"), ("reset_requested_at", "INTEGER")):
+        if name not in columns:
+            conn.execute(f"ALTER TABLE users ADD COLUMN {name} {kind}")
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS users_reset_token_idx ON users(reset_token_hash)")
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS payments (
@@ -219,6 +223,48 @@ def login(email: str, password: str) -> dict:
     public = public_user(dict(user))
     public["token"] = token
     return public
+
+
+def issue_password_reset(email: str, token_hash: str, expires_at: int, now: int) -> bool:
+    """Store only a digest; an atomic per-account cooldown limits email abuse."""
+    _require_durable()
+    if using_cloud():
+        from api.cloud_store import issue_password_reset as cloud_issue
+        return cloud_issue(email, token_hash, expires_at, now)
+    with connect() as conn:
+        updated = conn.execute(
+            "UPDATE users SET reset_token_hash = ?, reset_expires_at = ?, reset_requested_at = ? "
+            "WHERE email = ? AND (reset_requested_at IS NULL OR reset_requested_at <= ?)",
+            (token_hash, expires_at, now, email.lower().strip(), now - 60),
+        )
+        return updated.rowcount == 1
+
+
+def ensure_password_reset_ready() -> None:
+    _require_durable()
+    if using_cloud():
+        from api.cloud_store import ensure_password_reset_ready as cloud_ready
+        cloud_ready()
+    else:
+        connect().close()
+
+
+def complete_password_reset(token_hash: str, password_hash: str, now: int) -> bool:
+    """Consume the token and revoke sessions in the same transaction."""
+    _require_durable()
+    if using_cloud():
+        from api.cloud_store import complete_password_reset as cloud_complete
+        return cloud_complete(token_hash, password_hash, now)
+    with connect() as conn:
+        row = conn.execute(
+            "UPDATE users SET password_hash = ?, reset_token_hash = NULL, reset_expires_at = NULL "
+            "WHERE reset_token_hash = ? AND reset_expires_at > ? RETURNING id",
+            (password_hash, token_hash, now),
+        ).fetchone()
+        if row is None:
+            return False
+        conn.execute("DELETE FROM sessions WHERE user_id = ?", (row["id"],))
+        return True
 
 
 def user_by_token(token: str | None) -> dict | None:
@@ -455,25 +501,27 @@ def get_review(review_id: int, company_id: str | None = None) -> dict | None:
     return dict(row) if row else None
 
 
-def resolve_review(review_id: int, status: str, execution_note: str | None = None, company_id: str | None = None) -> dict | None:
-    if status not in {"approved", "rejected", "executed", "pending"}:
-        raise ValueError("Status must be approved, rejected, executed, or pending.")
+def resolve_review(review_id: int, status: str, execution_note: str | None = None, company_id: str | None = None, expected_status: str | None = None) -> dict | None:
+    if status not in {"approved", "rejected", "executed", "pending", "processing", "execution_uncertain"}:
+        raise ValueError("Invalid review status.")
     if using_cloud():
         from api.cloud_store import resolve_review as cloud_resolve_review
-        return cloud_resolve_review(review_id, status, execution_note, company_id)
+        return cloud_resolve_review(review_id, status, execution_note, company_id, expected_status)
     conn = connect()
     _ensure_reviews(conn)
+    where = "id = ?"
+    params = [status, execution_note, review_id]
     if company_id:
-        conn.execute(
-            "UPDATE human_reviews SET status = ?, execution_note = ? WHERE id = ? AND company_id = ?",
-            (status, execution_note, review_id, company_id),
-        )
-    else:
-        conn.execute(
-            "UPDATE human_reviews SET status = ?, execution_note = ? WHERE id = ?",
-            (status, execution_note, review_id),
-        )
+        where += " AND company_id = ?"
+        params.append(company_id)
+    if expected_status:
+        where += " AND status = ?"
+        params.append(expected_status)
+    # Claim before any external effect: only one concurrent caller can win.
+    updated = conn.execute(f"UPDATE human_reviews SET status = ?, execution_note = ? WHERE {where}", params)
     conn.commit()
+    if not updated.rowcount:
+        return None
     row = conn.execute("SELECT * FROM human_reviews WHERE id = ?", (review_id,)).fetchone()
     return dict(row) if row else None
 
