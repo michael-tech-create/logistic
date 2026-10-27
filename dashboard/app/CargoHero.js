@@ -110,7 +110,7 @@ export default function CargoHero() {
     <div className={s.window}>
       <div className={s.toolbar}><span className={s.windowName}><span className={s.statusDot} aria-hidden="true" /> THE CONNECTED QUOTE DESK</span><span className={s.sceneTag}>CARGO IN MOTION</span></div>
       <div className={s.media}>
-        <picture><source srcSet="/cargo-ship-poster-640.webp 640w, /cargo-ship-poster-960.webp 960w" sizes="(max-width: 760px) calc(100vw - 40px), (max-width: 1050px) 55vw, 720px" type="image/webp" /><img className={s.poster} src="/cargo-ship-poster-960.webp" width="960" height="540" fetchPriority="high" alt="A container ship beside a cargo terminal, with cranes, stacked containers, and glowing blue connections between automated vehicles." /></picture>
+        <picture><source srcSet="/cargo-ship-poster-640.webp 640w, /cargo-ship-poster-960.webp 960w" sizes="(max-width: 760px) calc(100vw - 40px), 65vw" type="image/webp" /><img className={s.poster} src="/cargo-ship-poster-960.webp" width="960" height="540" loading="lazy" decoding="async" alt="A container ship beside a cargo terminal, with cranes, stacked containers, and glowing blue connections between automated vehicles." /></picture>
         <video ref={player} data-cargo-video className={`${s.video} ${hasFrame ? s.hasFrame : ""}`} width="960" height="540" loop muted playsInline preload="none" aria-hidden="true" tabIndex={-1} onPlaying={() => { setPlaying(true); setHasFrame(true); }} onPause={() => setPlaying(false)} />
         <div className={s.mediaCaption}><span>SMARTER TOOLS.<br /><strong>CLEARER HANDOFFS.</strong></span><span className={s.corner} aria-hidden="true" /></div>
       </div>

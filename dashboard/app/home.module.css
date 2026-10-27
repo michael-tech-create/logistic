@@ -42,6 +42,12 @@
 .heroGridFloor { position: absolute; inset: 0; overflow: hidden; pointer-events: none; opacity: .55; mask-image: linear-gradient(transparent,black 60%,transparent); }
 .heroGridFloor::before { content: ''; position: absolute; inset: -90px; background-image: linear-gradient(#547b9a13 1px,transparent 1px),linear-gradient(90deg,#547b9a13 1px,transparent 1px); background-size: 80px 80px; transform: perspective(650px) rotateX(35deg); animation: gridDrift 18s linear infinite; }
 .heroGrid { position: relative; display: grid; grid-template-columns: .85fr 1.2fr; align-items: center; gap: 36px; }
+.cargoSection { padding: 56px 0 72px; background: #f7fafc; }
+.cargoGrid { display: grid; grid-template-columns: .7fr 1.3fr; align-items: center; gap: 48px; }
+.cargoCopy { min-width: 0; }
+.cargoCopy h2 { margin: 18px 0; font-size: clamp(30px,3.4vw,44px); }
+.cargoCopy p { color: var(--muted); font-size: 15px; line-height: 1.8; }
+.cargoCopy > a { display: inline-flex; align-items: center; gap: 18px; margin-top: 22px; color: var(--cyan); font-size: 14px; }
 .eyebrow { display: flex; align-items: center; gap: 9px; color: var(--cyan); font: 10px/1.7 monospace; letter-spacing: .14em; text-transform: uppercase; }
 .dot { width: 6px; height: 6px; border-radius: 50%; background: #238975; flex-shrink: 0; }
 .heroCopy { position: relative; z-index: 2; }
@@ -165,9 +171,11 @@
 @keyframes gridDrift { from { transform: perspective(650px) rotateX(35deg) translateY(0); } to { transform: perspective(650px) rotateX(35deg) translateY(80px); } }
 @keyframes marquee { to { transform: translateX(calc(-50% - 21px)); } }
 @media(max-width:1050px) {
+  .cargoGrid { gap: 26px; }
   .container { width: calc(100% - 56px); }.navLinks { gap: 20px; }.hero { padding-top: 45px; }.heroGrid { gap: 20px; }.hero h1 { font-size: 56px; }.heroCopy > p { font-size: 15px; }.ctaRow .button { padding: 13px 17px; gap: 14px; }.floatCard { min-width: 235px; }.card { padding: 25px; }.workflowGrid { gap: 25px; }.faqLayout { gap: 45px; }
 }
 @media(max-width:760px) {
+  .cargoSection { padding: 40px 0 46px; }.cargoGrid { grid-template-columns: 1fr; gap: 8px; }.cargoCopy { max-width: 520px; }.cargoCopy h2 { font-size: 34px; }
   .container { width: calc(100% - 40px); }.nav { height: 72px; gap: 12px; }.navLinks,.navActions { display: none; }.mobileMenu { display: block; }.mobileMenu summary { list-style: none; cursor: pointer; padding: 10px 12px; border: 1px solid #c9d6e1; border-radius: 7px; font-size: 13px; }.mobileMenu summary::-webkit-details-marker { display: none; }.mobileMenu nav { position: absolute; left: 0; right: 0; top: 72px; display: flex; flex-direction: column; padding: 20px; gap: 8px; background: #fffffff7; border-bottom: 1px solid #d1dce5; }.mobileMenu nav a { padding: 10px; }
   .hero { padding: 42px 0 30px; }.heroGrid { grid-template-columns: 1fr; gap: 12px; }.hero h1 { font-size: clamp(47px,10vw,64px); max-width: 560px; }.heroCopy > p { max-width: 480px; font-size: 15px; }.heroArt { margin: 5px 0 0; padding: 30px 0 50px; max-width: 580px; }.imageLabel { right: 2px; top: 4px; font-size: 8px; }.imageFrame { animation-duration: 8s; }.floatCard { left: 0; padding: 13px 17px; min-width: 240px; bottom: 12px; animation-duration: 6s; }.heroFoot { margin-top: 15px; flex-direction: column; align-items: flex-start; gap: 14px; }.formats { gap: 20px; }.heroGridFloor { opacity: .3; }.marquee { padding: 16px 0; }.marqueeTrack { animation-duration: 45s; }
   .section { padding: 64px 0; }.sectionHead { flex-direction: column; align-items: flex-start; gap: 17px; margin-bottom: 28px; }.sectionHead > p { max-width: 100%; }.cards { grid-template-columns: 1fr; gap: 14px; }.card { padding: 27px; }.iconBox { margin-bottom: 20px; }.cardFoot { margin-top: 24px; }.workflowGrid { grid-template-columns: 1fr; gap: 24px; }.step { padding: 17px; }.previewBody { padding: 22px; }.routeGraphic { height: 105px; margin-top: -12px; }.approvalNote { margin-top: 28px; padding: 23px; flex-direction: column; align-items: flex-start; gap: 17px; }.faqLayout { grid-template-columns: 1fr; gap: 25px; }.ctaPanel { flex-direction: column; align-items: flex-start; padding: 34px 25px; }.finalCta { padding: 20px 0 50px; }.footer { padding-bottom: 110px; }.footerTop,.footerBottom { align-items: flex-start; flex-direction: column; gap: 20px; }.footerLinks { flex-wrap: wrap; gap: 20px; }

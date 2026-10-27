@@ -1,13 +1,13 @@
 import s from "./home.module.css";
 import Brand from "./Brand";
 import CargoHero from "./CargoHero";
-import { FormatMarquee, MotionControl, QuoteRoute } from "./HomeMotion";
+import { FormatMarquee, HeroOrbit, MotionControl, QuoteRoute } from "./HomeMotion";
 import { LegacyDeskLinks, WorkflowPreview } from "./HomeExperience";
 
 export const metadata = {
-  title: "Clearing Desk | Freight quotes. Clear next steps.",
-  description: "Turn freight quotes from PDFs, text, and Telegram into checked costs and client-ready files. Built for clearing teams. Start with 5 free trial parses.",
-  openGraph: { title: "Freight quotes. Clear next steps. | Clearing Desk", description: "One workspace to collect freight quotes, check costs, and prepare client files.", images: [{ url: "/cargo-ship-poster-960.webp", width: 960, height: 540, alt: "A container ship and connected cargo terminal at night" }], type: "website" },
+  title: "Clearing Desk | AI-powered freight quote platform",
+  description: "Clearing Desk is an AI-powered freight quote platform for clearing teams. Extract details from PDFs, text, and Telegram, review costs, and prepare client-ready files.",
+  openGraph: { title: "Clearing Desk | AI-powered freight quote platform", description: "AI extracts your freight quote details. Your team checks the costs and prepares client-ready files in one workspace.", images: [{ url: "/cargo-ship-poster-960.webp", width: 960, height: 540, alt: "A container ship and connected cargo terminal at night" }], type: "website" },
 };
 
 function Icon({ type = "box" }) {
@@ -17,7 +17,7 @@ function Icon({ type = "box" }) {
 function CTA({ children = "Start your free workspace", secondary = false, href = "/desk?mode=register", small = false }) { return <a href={href} className={`${s.button} ${secondary ? s.secondary : ""} ${small ? s.buttonSmall : ""}`}>{children}<Icon type="arrow" /></a>; }
 
 const features = [
-  ["file", "Less copying. More clarity.", "Bring PDFs, text files, and Telegram quotes into one inbox. Keep the source alongside the extracted details.", "01 / COLLECT YOUR QUOTES"],
+  ["file", "Less copying. More clarity.", "Let AI extract freight quote details from PDFs, text, and Telegram. Keep the original source alongside the structured details in one inbox.", "01 / COLLECT YOUR QUOTES"],
   ["review", "Know what you’re quoting.", "Check routes, charges, and currencies. See missing details and review the NGN estimate before you share.", "02 / CHECK THE DETAILS"],
   ["export", "Make the next step easy.", "Turn checked quotes into a clean PDF or Excel file. Export a single quote or prepare a complete client pack.", "03 / PREPARE CLIENT FILES"],
 ];
@@ -27,7 +27,7 @@ const plans = [
   { name: "Desk 1,000", price: "₦50,000", unit: "/ month", parses: "1,000 parses per month", description: "More capacity for a busier desk.", cta: "Start with the free trial", details: ["PDF and Excel client exports", "Company quote inbox", "Manage rates and port risk"] },
 ];
 const faqs = [
-  ["What does Clearing Desk actually do?", "Clearing Desk helps you collect and check freight quotes, review charges and estimated NGN costs, and prepare files for your clients. It is quote management software; transport and shipment arrangements stay with your providers."],
+  ["What does Clearing Desk actually do?", "Clearing Desk is an AI-powered freight quote platform for clearing teams. AI extracts quote details from your documents and messages. Your team checks routes, charges, and estimated NGN costs before preparing client files. Transport and shipment arrangements stay with your providers."],
   ["How do I bring in my first quote?", "Create a workspace, choose Add a quote, and paste the quote text or upload a PDF or TXT file. Check the extracted route and charges, fill in anything missing, and mark the quote checked before exporting."],
   ["Can I use it from Telegram?", "Yes. Open Connections inside your workspace, copy your company’s link command, and send it to your Telegram bot. Once linked, you can send quote text, PDFs, photos, and voice notes. Photo and voice processing require the configured media service."],
   ["What counts as a parse?", "A new quote submitted for extraction uses one parse. A file in an upload batch counts separately. Checking and exporting saved quotes do not use parses. Your workspace shows your remaining allowance."],
@@ -36,7 +36,7 @@ const faqs = [
 ];
 
 export default function HomePage() {
-  const schema = { "@context": "https://schema.org", "@graph": [{ "@type": "Organization", "@id": "#organization", name: "Clearing Desk", description: "Freight quote management software for clearing teams." }, { "@type": "Service", name: "Freight quote processing", provider: { "@id": "#organization" }, serviceType: "Freight quote extraction, review, and client document preparation", areaServed: "Nigeria" }] };
+  const schema = { "@context": "https://schema.org", "@graph": [{ "@type": "Organization", "@id": "#organization", name: "Clearing Desk", description: "An AI-powered freight quote platform for clearing teams." }, { "@type": "Service", name: "Freight quote processing", provider: { "@id": "#organization" }, serviceType: "Freight quote extraction, review, and client document preparation", areaServed: "Nigeria" }] };
   return <div className={s.site} id="home-page">
     <LegacyDeskLinks />
     <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: JSON.stringify(schema).replace(/</g, "\\u003c") }} />
@@ -44,19 +44,20 @@ export default function HomePage() {
     <header className={s.header}><div data-scroll-progress className={s.scrollProgress} /><div data-nav className={`${s.container} ${s.nav}`}><Brand /><nav className={s.navLinks} aria-label="Main navigation"><a href="#features">The platform</a><a href="#workflow">How it works</a><a href="#pricing">Pricing</a><a href="#faq">FAQs</a></nav><div className={s.navActions}><a href="/desk">Sign in</a><CTA small>Start free</CTA></div><details id="home-menu" className={s.mobileMenu}><summary>Menu ☰</summary><nav aria-label="Mobile navigation"><a href="#features">The platform</a><a href="#workflow">How it works</a><a href="#pricing">Pricing</a><a href="#faq">FAQs</a><a href="/desk">Sign in to your desk →</a></nav></details></div></header>
     <main id="main">
       <section data-hero className={s.hero} aria-labelledby="hero-title"><div className={s.heroGridFloor} aria-hidden="true" /><div className={s.container}>
-        <div className={s.heroGrid}><div className={s.heroCopy}><div className={s.eyebrow}><span className={s.dot} /> BUILT FOR THE WORK BEHIND EVERY SHIPMENT</div><h1 id="hero-title">Freight quotes.<br /><span>Clear next steps.</span></h1><p>From a forwarded quote to a file your client can use. Collect, check, and prepare your freight quotes in one connected workspace.</p><div className={s.ctaRow}><CTA>Start free</CTA><CTA secondary href="#workflow">See how it works</CTA></div><p className={s.trial}><Icon type="check" /> 5 free trial parses. No card required.</p></div>
-          <CargoHero />
+        <div className={s.heroGrid}><div className={s.heroCopy}><div className={s.eyebrow}><span className={s.dot} /> AI-POWERED FREIGHT QUOTE PLATFORM</div><h1 id="hero-title">Freight quotes.<br /><span>Clear next steps.</span></h1><p>Clearing Desk uses AI to turn PDFs, text, and Telegram messages into structured freight quotes. Review the details and prepare client-ready files, with your team in control.</p><div className={s.ctaRow}><CTA>Start free</CTA><CTA secondary href="#workflow">See how it works</CTA></div><p className={s.trial}><Icon type="check" /> 5 free trial parses. No card required.</p></div>
+          <div className={s.heroArt} data-tilt><HeroOrbit /><div className={s.imageFrame}><picture><source type="image/webp" srcSet="/delivery-robot-640.webp 640w, /delivery-robot-1280.webp 1280w" sizes="(max-width: 760px) calc(100vw - 40px), 50vw" /><img src="/delivery-robot-1280.webp" width="1280" height="1067" fetchPriority="high" alt="A friendly blue and white delivery robot carries a parcel in front of a freight truck and connected globe." /></picture></div><span className={s.imageLabel}>YOUR NEXT-GENERATION QUOTE DESK</span><div className={s.floatCard}><span>THE QUOTE WORKFLOW, CONNECTED</span><strong>Collect → Check → Export</strong><small>Your team stays in control at every step.</small></div></div>
         </div>
         <div className={s.heroFoot}><div><span>A clearer route from intake to client.</span><br /><MotionControl /></div><div className={s.formats}><span><Icon type="file" /> PDF &amp; text</span><span><Icon type="chat" /> Telegram</span><span><Icon type="export" /> PDF &amp; Excel exports</span></div></div>
       </div></section>
       <FormatMarquee />
+      <section className={s.cargoSection} aria-labelledby="cargo-title"><div className={`${s.container} ${s.cargoGrid}`}><div className={s.cargoCopy} data-reveal><div className={s.eyebrow}>CONNECTED CARGO. HUMAN DECISIONS.</div><h2 id="cargo-title">The bigger picture.<br />A clearer workflow.</h2><p>Keep your quote details connected, from the first document to the client file. AI helps extract the details. Your team checks what goes next.</p><a href="#workflow">Explore the workflow <span aria-hidden="true">↗</span></a></div><CargoHero /></div></section>
       <section id="features" className={s.section}><div className={s.container}><div className={s.sectionHead} data-reveal><div><div className={s.eyebrow}>01 / ONE CONNECTED WORKSPACE</div><h2>Less back and forth.<br />More moving forward.</h2></div><p>Your quote workflow deserves the same attention as the shipment itself. Keep the details together, from the first message to the final file.</p></div><div className={s.cards}>{features.map(([icon, title, text, foot]) => <article className={s.card} key={title} data-reveal data-tilt><div className={s.iconBox}><Icon type={icon} /></div><h3>{title}</h3><p>{text}</p><div className={s.cardFoot}>{foot}</div></article>)}</div></div></section>
       <section id="workflow" className={`${s.section} ${s.workflow}`}><div className={s.container}><div className={s.sectionHead} data-reveal><div><div className={s.eyebrow}>02 / A WORKFLOW THAT MAKES SENSE</div><h2>Three steps.<br />One clear handoff.</h2></div><p>Explore the workflow below, then try it with a quote of your own.</p></div><QuoteRoute /><WorkflowPreview /><div className={s.approvalNote} data-reveal><div><h3>Human decisions. Clear boundaries.</h3><p>Quote checking and payment approval are separate. Provider submissions require your approval and a connected service.</p></div><a href="#faq">Understand approvals ↗</a></div></div></section>
       <section id="pricing" className={s.section}><div className={s.container}><div className={s.sectionHead} data-reveal><div><div className={s.eyebrow}>03 / START SMALL. MAKE ROOM TO GROW.</div><h2>A plan for your desk.</h2></div><p>Try the complete quote workflow first. Choose more capacity in your workspace when you need it.</p></div><div className={s.cards}>{plans.map((plan) => <article key={plan.name} data-reveal className={`${s.card} ${s.plan} ${plan.featured ? s.featured : ""}`}>{plan.featured && <span className={s.planTag}>FOR EVERYDAY QUOTE WORK</span>}<h3>{plan.name}</h3><p>{plan.description}</p><div className={s.price}><strong>{plan.price}</strong><span>{plan.unit}</span></div><span className={s.parseCount}>{plan.parses}</span><ul className={s.planList}>{plan.details.map((detail) => <li key={detail}><Icon type="check" />{detail}</li>)}</ul><CTA secondary={!plan.featured}>{plan.cta}</CTA></article>)}</div><p className={s.pricingNote}>One parse per newly processed quote or uploaded file. Checking and exporting saved quotes use no extra parses.</p></div></section>
       <section id="faq" className={s.section}><div className={`${s.container} ${s.faqLayout}`} data-reveal><div><div className={s.eyebrow}>04 / A FEW THINGS TO KNOW</div><h2>Before you<br />get moving.</h2></div><div className={s.faqList}>{faqs.map(([q, a]) => <details key={q}><summary>{q}</summary><p>{a}</p></details>)}</div></div></section>
       <section className={s.finalCta}><div className={s.container}><div className={s.ctaPanel} data-reveal><div><h2>Your next quote.<br />A clearer way forward.</h2><p>Open your desk and put your first five trial parses to work.</p></div><CTA /></div></div></section>
     </main>
-    <footer className={s.footer}><div className={s.container}><div className={s.footerTop}><Brand /><nav className={s.footerLinks} aria-label="Footer navigation"><a href="#features">Platform</a><a href="#workflow">Workflow</a><a href="#pricing">Pricing</a><a href="/desk">Open your desk ↗</a></nav></div><div className={s.footerBottom}><span>© {new Date().getFullYear()} Clearing Desk. Built for the work behind every shipment.</span><span>Freight quote management · Nigeria &amp; beyond</span></div></div></footer>
+    <footer className={s.footer}><div className={s.container}><div className={s.footerTop}><Brand /><nav className={s.footerLinks} aria-label="Footer navigation"><a href="#features">Platform</a><a href="#workflow">Workflow</a><a href="#pricing">Pricing</a><a href="/desk">Open your desk ↗</a></nav></div><div className={s.footerBottom}><span>© {new Date().getFullYear()} Clearing Desk. Built for the work behind every shipment.</span><span>AI-powered freight quotes · Nigeria &amp; beyond</span></div></div></footer>
     <div className={s.mobileCta}><span>5 free trial parses</span><CTA small>Start free</CTA></div>
   </div>;
 }
