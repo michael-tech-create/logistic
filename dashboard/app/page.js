@@ -1,12 +1,13 @@
 import s from "./home.module.css";
 import Brand from "./Brand";
-import { FormatMarquee, HeroOrbit, MotionControl, QuoteRoute } from "./HomeMotion";
+import CargoHero from "./CargoHero";
+import { FormatMarquee, MotionControl, QuoteRoute } from "./HomeMotion";
 import { LegacyDeskLinks, WorkflowPreview } from "./HomeExperience";
 
 export const metadata = {
   title: "Clearing Desk | Freight quotes. Clear next steps.",
   description: "Turn freight quotes from PDFs, text, and Telegram into checked costs and client-ready files. Built for clearing teams. Start with 5 free trial parses.",
-  openGraph: { title: "Freight quotes. Clear next steps. | Clearing Desk", description: "One workspace to collect freight quotes, check costs, and prepare client files.", images: [{ url: "/delivery-robot-1280.webp", width: 1280, height: 1067, alt: "A delivery robot beside a freight truck and connected globe" }], type: "website" },
+  openGraph: { title: "Freight quotes. Clear next steps. | Clearing Desk", description: "One workspace to collect freight quotes, check costs, and prepare client files.", images: [{ url: "/cargo-ship-poster-960.webp", width: 960, height: 540, alt: "A container ship and connected cargo terminal at night" }], type: "website" },
 };
 
 function Icon({ type = "box" }) {
@@ -44,7 +45,7 @@ export default function HomePage() {
     <main id="main">
       <section data-hero className={s.hero} aria-labelledby="hero-title"><div className={s.heroGridFloor} aria-hidden="true" /><div className={s.container}>
         <div className={s.heroGrid}><div className={s.heroCopy}><div className={s.eyebrow}><span className={s.dot} /> BUILT FOR THE WORK BEHIND EVERY SHIPMENT</div><h1 id="hero-title">Freight quotes.<br /><span>Clear next steps.</span></h1><p>From a forwarded quote to a file your client can use. Collect, check, and prepare your freight quotes in one connected workspace.</p><div className={s.ctaRow}><CTA>Start free</CTA><CTA secondary href="#workflow">See how it works</CTA></div><p className={s.trial}><Icon type="check" /> 5 free trial parses. No card required.</p></div>
-          <div className={s.heroArt} data-tilt><HeroOrbit /><div className={s.imageFrame}><picture><source type="image/webp" srcSet="/delivery-robot-640.webp 640w, /delivery-robot-1280.webp 1280w" sizes="(max-width: 760px) calc(100vw - 60px), 50vw" /><img src="/delivery-robot-1280.webp" width="1280" height="1067" fetchPriority="high" alt="A friendly blue and white delivery robot carries a parcel in front of a freight truck and connected globe." /></picture></div><span className={s.imageLabel}>YOUR NEXT-GENERATION QUOTE DESK</span><div className={s.floatCard}><span>THE QUOTE WORKFLOW, CONNECTED</span><strong>Collect → Check → Export</strong><small>Your team stays in control at every step.</small></div></div>
+          <CargoHero />
         </div>
         <div className={s.heroFoot}><div><span>A clearer route from intake to client.</span><br /><MotionControl /></div><div className={s.formats}><span><Icon type="file" /> PDF &amp; text</span><span><Icon type="chat" /> Telegram</span><span><Icon type="export" /> PDF &amp; Excel exports</span></div></div>
       </div></section>

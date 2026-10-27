@@ -41,7 +41,7 @@
 /* Move the whole grid with transforms rather than repainting its background. */
 .heroGridFloor { position: absolute; inset: 0; overflow: hidden; pointer-events: none; opacity: .55; mask-image: linear-gradient(transparent,black 60%,transparent); }
 .heroGridFloor::before { content: ''; position: absolute; inset: -90px; background-image: linear-gradient(#547b9a13 1px,transparent 1px),linear-gradient(90deg,#547b9a13 1px,transparent 1px); background-size: 80px 80px; transform: perspective(650px) rotateX(35deg); animation: gridDrift 18s linear infinite; }
-.heroGrid { position: relative; display: grid; grid-template-columns: .95fr 1.1fr; align-items: center; gap: 30px; }
+.heroGrid { position: relative; display: grid; grid-template-columns: .85fr 1.2fr; align-items: center; gap: 36px; }
 .eyebrow { display: flex; align-items: center; gap: 9px; color: var(--cyan); font: 10px/1.7 monospace; letter-spacing: .14em; text-transform: uppercase; }
 .dot { width: 6px; height: 6px; border-radius: 50%; background: #238975; flex-shrink: 0; }
 .heroCopy { position: relative; z-index: 2; }

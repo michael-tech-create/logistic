@@ -44,12 +44,12 @@ export function MotionControl() {
 
         const orbit = root.querySelector("[data-orbit-marker]");
         const orbitPath = root.querySelector("[data-orbit-path]");
-        const orbitTween = gsap.to(orbit, { duration: 12, repeat: -1, ease: "none", motionPath: { path: orbitPath, align: orbitPath, alignOrigin: [.5,.5] } });
-        loops.push(orbitTween);
+        const orbitTween = orbit && orbitPath ? gsap.to(orbit, { duration: 12, repeat: -1, ease: "none", motionPath: { path: orbitPath, align: orbitPath, alignOrigin: [.5,.5] } }) : null;
+        if (orbitTween) loops.push(orbitTween);
         let heroVisible = true;
         const updateVisibility = () => {
           root.dataset.pageHidden = String(document.hidden);
-          orbitTween.paused(!heroVisible || document.hidden);
+          orbitTween?.paused(!heroVisible || document.hidden);
         };
         observe(root.querySelector("[data-hero]"), (visible) => { heroVisible = visible; root.dataset.offscreen = String(!visible); updateVisibility(); });
         document.addEventListener("visibilitychange", updateVisibility);
