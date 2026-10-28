@@ -5,6 +5,8 @@ import { Alert, Box, Button, Chip, Divider, IconButton, MenuItem, Paper, Stack, 
 import { ArrowForward, CheckCircleOutline, ContentCopy, Refresh } from "@mui/icons-material";
 import { money, request, reviewStatusOf } from "./workflow.mjs";
 
+import WhatsAppConnection from "./WhatsAppConnection";
+
 export const panel = { p: { xs: 2, md: 3 }, border: 1, borderColor: "divider" };
 export function Heading({ title, description, action }) {
   return <Stack direction={{ xs: "column", sm: "row" }} justifyContent="space-between" gap={2} sx={{ mb: 2.5 }}><Box><Typography variant="h2">{title}</Typography>{description && <Typography variant="body2" color="text.secondary" sx={{ mt: .5 }}>{description}</Typography>}</Box>{action}</Stack>;
@@ -51,8 +53,9 @@ export function Connections({ token, company, perform, busy, notify, onQuotes, o
       <Typography variant="body2">3. Wait for the bot’s link confirmation, then send text, a voice note, a photo, or a PDF.</Typography>
       <Typography variant="body2" color="text.secondary">Quotes appear in your inbox after processing. A copied command alone does not confirm a connection.</Typography><Button sx={{ alignSelf: "flex-start" }} onClick={onQuotes} endIcon={<ArrowForward />}>Go to quote inbox</Button>
     </Stack></Paper>
+    <WhatsAppConnection token={token} />
     <Paper sx={panel}><Heading title="Email intake" description="Check whether the desk can reach its configured mailbox." action={<Button variant="outlined" disabled={!!busy} onClick={() => perform("email", async () => setEmailStatus(await request(token, "/v1/channels/email")))}>{busy === "email" ? "Checking…" : "Check email connection"}</Button>} /><Typography variant="body2" color="text.secondary">Email routing uses the inbound addresses assigned to your company. Ask your desk administrator to configure those addresses before forwarding quotes.</Typography>{emailStatus && <Alert severity={emailStatus.ok ? "success" : "warning"} sx={{ mt: 2 }}>{emailStatus.detail}</Alert>}</Paper>
-    <Paper sx={panel}><Heading title="Upload directly" description="Add readable PDFs, TXT files, or pasted text without linking a channel." /><Button variant="outlined" onClick={onAdd}>Add a quote</Button></Paper>
+    <Paper sx={panel}><Heading title="Upload directly" description="Add PDFs, text, images, voice notes, or pasted quotes without linking a channel." /><Button variant="outlined" onClick={onAdd}>Add a quote</Button></Paper>
   </Stack>;
 }
 

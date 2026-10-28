@@ -33,7 +33,7 @@ test("search and check filters compose", () => {
 });
 test("file validation catches unsupported, empty, oversized, and over-quota uploads", () => {
   assert.match(validateFiles([], 5), /Choose at least/);
-  assert.match(validateFiles([{ name: "quote.csv", size: 3 }], 5), /PDF or TXT/);
+  assert.match(validateFiles([{ name: "quote.csv", size: 3 }], 5), /PDF, TXT, image, or audio/);
   assert.match(validateFiles([{ name: "quote.txt", size: 0 }], 5), /empty/);
   assert.match(validateFiles([{ name: "quote.pdf", size: 11 * 1024 * 1024 }], 5), /10 MB/);
   assert.match(validateFiles([{ name: "quote.txt", size: 3 }], 0), /0 parses/);
@@ -61,6 +61,19 @@ test("server errors and quota status are preserved for recovery", async () => {
   const original = globalThis.fetch;
   globalThis.fetch = async () => new Response(JSON.stringify({ detail: "No parses left" }), { status: 402 });
   try { await assert.rejects(request("fixture", "/v1/quotes/parse"), (error) => error.status === 402 && error.message === "No parses left"); }
+  finally { globalThis.fetch = original; }
+});
+
+test("a hung session check stops instead of holding the workspace open", async () => {
+  const original = globalThis.fetch;
+  globalThis.fetch = (_url, options) => new Promise((_resolve, reject) => {
+    options.signal.addEventListener("abort", () => {
+      const error = new Error("aborted");
+      error.name = "AbortError";
+      reject(error);
+    });
+  });
+  try { await assert.rejects(request("fixture", "/v1/me", { timeout: 40 }), /taking longer than expected/); }
   finally { globalThis.fetch = original; }
 });
 

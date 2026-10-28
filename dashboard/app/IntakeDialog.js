@@ -70,7 +70,7 @@ export default function IntakeDialog({ token, quota, seed, onClose, onCreated, o
               <Box onDragOver={(event) => { event.preventDefault(); if (!busy) setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={(event) => { event.preventDefault(); setDragging(false); if (!busy) choose(event.dataTransfer.files); }} sx={{ border: "2px dashed", borderColor: dragging ? "primary.main" : "surface.blueBorder", bgcolor: dragging ? "surface.blue" : "surface.soft", borderRadius: 2, textAlign: "center", p: 4 }}>
                 <UploadFileOutlined sx={{ color: "primary.main", fontSize: 36, mb: 1 }} />
                 <Typography fontWeight={650}>Drop your carrier quotes here</Typography>
-                <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>PDF or TXT · up to 10 MB per file</Typography>
+                <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>PDF, text, image, or audio · up to 10 MB per file</Typography>
                 <Button variant="outlined" onClick={() => input.current?.click()} disabled={busy}>Browse files</Button>
                 <input ref={input} type="file" accept=".pdf,.txt,application/pdf,text/plain" multiple hidden aria-label="Quote files" onChange={(event) => { choose(event.target.files); event.target.value = ""; }} />
               </Box>
@@ -81,7 +81,7 @@ export default function IntakeDialog({ token, quota, seed, onClose, onCreated, o
                   <IconButton size="small" aria-label={`Remove ${file.name}`} disabled={busy} onClick={() => setFiles(files.filter((_, i) => i !== index))}><Close fontSize="small" /></IconButton>
                 </Stack>
               ))}</Stack>}
-              <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 1 }}>Scanned PDFs may have no readable text. You can send those as a photo to Telegram.</Typography>
+              <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 1 }}>Scans, images, and voice notes use the media reader. Check extracted amounts against the original before exporting.</Typography>
             </Box>
           ) : (
             <Box role="tabpanel" id="text-panel" aria-labelledby="source-text">

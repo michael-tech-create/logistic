@@ -1,9 +1,11 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Accordion, AccordionDetails, AccordionSummary, Alert, Box, Button, Checkbox, Chip, Dialog, DialogActions, DialogContent, DialogTitle, Divider, FormControlLabel, IconButton, Stack, Step, StepLabel, Stepper, Table, TableBody, TableCell, TableContainer, TableHead, TableRow, TextField, Typography } from "@mui/material";
 import { CheckCircleOutline, Close, DownloadOutlined, ExpandMore, OpenInNew } from "@mui/icons-material";
 import { missingDetails, money, request, saveDownload, statusOf } from "./workflow.mjs";
+
+import ShipmentCosts from "./ShipmentCosts";
 
 function Detail({ label, children }) {
   return <Box><Typography variant="caption" color="text.secondary">{label}</Typography><Typography variant="body2" fontWeight={600} sx={{ overflowWrap: "anywhere" }}>{children || "Not provided"}</Typography></Box>;
@@ -15,6 +17,7 @@ export default function QuoteDialog({ token, record, onClose, onUpdate, onCorrec
   const [error, setError] = useState("");
   const [note, setNote] = useState("");
   const [accounts, setAccounts] = useState({ trucker_account: "", agent_account: "", customs_account: "" });
+  useEffect(() => { setConfirmed(false); }, [record]);
   const status = statusOf(record);
   const commercial = record.commercial || {};
   const movement = record.movement || {};
@@ -82,6 +85,7 @@ export default function QuoteDialog({ token, record, onClose, onUpdate, onCorrec
           </Box>}
           {!!record.extraction_flags?.length && <Accordion disableGutters variant="outlined"><AccordionSummary expandIcon={<ExpandMore />}><Typography variant="body2" fontWeight={600}>Extraction notes ({record.extraction_flags.length})</Typography></AccordionSummary><AccordionDetails><Stack component="ul" spacing={1} sx={{ m: 0, pl: 2 }}>{record.extraction_flags.map((flag, index) => <Typography key={index} component="li" variant="body2">{flag}</Typography>)}</Stack></AccordionDetails></Accordion>}
           {record.source_text && <Accordion disableGutters variant="outlined"><AccordionSummary expandIcon={<ExpandMore />}><Typography variant="body2" fontWeight={600}>Original quote text</Typography></AccordionSummary><AccordionDetails><Typography component="pre" variant="body2" sx={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere", fontFamily: "inherit" }}>{record.source_text}</Typography><Button onClick={() => onCorrect(record)} startIcon={<OpenInNew />}>Correct text and parse again</Button><Typography variant="caption" display="block" color="text.secondary">Creates a new quote and uses one parse. The original stays in your inbox.</Typography></AccordionDetails></Accordion>}
+          <ShipmentCosts token={token} record={record} onUpdate={onUpdate} />
           <Divider />
           {checked ? <Alert severity="success" icon={<CheckCircleOutline />}>Quote checked. You can now export the client file. This check does not approve a payment or customs release.</Alert> : <Box><FormControlLabel control={<Checkbox checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} disabled={!!busy || !!missing.length} />} label="I have checked the route, currency, charges, and extraction notes against the original quote." /><Typography variant="caption" color="text.secondary" display="block" sx={{ ml: 4 }}>This saves your check to the quote. It does not send money or clear cargo.</Typography></Box>}
           {checked && <Accordion disableGutters variant="outlined"><AccordionSummary expandIcon={<ExpandMore />}><Typography variant="body2" fontWeight={600}>Optional: finance and settlement records</Typography></AccordionSummary><AccordionDetails>

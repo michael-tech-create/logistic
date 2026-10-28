@@ -1,5 +1,5 @@
-import DeskApp from "../DeskApp";
+import OpenWorkspace from "../OpenWorkspace";
 
 export const metadata = { title: "Your workspace | Clearing Desk", robots: { index: false, follow: false } };
 
-export default function DeskPage() { return <DeskApp />; }
+export default function DeskPage() { return <OpenWorkspace />; }

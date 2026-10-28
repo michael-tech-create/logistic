@@ -1,13 +1,13 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Alert, Avatar, Box, Button, Chip, CircularProgress, Container, Dialog, DialogActions, DialogContent, DialogTitle, IconButton, LinearProgress, Paper, Skeleton, Stack, Typography } from "@mui/material";
+import { Alert, Avatar, Box, Button, Chip, Container, Dialog, DialogActions, DialogContent, DialogTitle, IconButton, LinearProgress, Paper, Skeleton, Stack, Typography } from "@mui/material";
 import { Add, ArrowForward, DescriptionOutlined, DownloadOutlined, FactCheckOutlined, HubOutlined, Logout, SettingsOutlined } from "@mui/icons-material";
-import Auth from "./Auth";
 import Brand from "./Brand";
 import IntakeDialog from "./IntakeDialog";
 import QuoteDialog from "./QuoteDialog";
 import QuoteInbox from "./QuoteInbox";
+import OperationsSummary from "./OperationsSummary";
 import { Approvals, Connections, panel, Settings } from "./WorkspacePanels";
 import { filterRecords, mergeRecords, money, request, saveDownload, statusOf } from "./workflow.mjs";
 
@@ -24,7 +24,7 @@ const headings = {
   settings: ["Workspace settings", "Manage your rates, port risk, and parse allowance."],
 };
 
-function Workspace({ token, initialUser, onSignOut }) {
+export default function Workspace({ token, initialUser, onSignOut }) {
   const [me, setMe] = useState(initialUser);
   const [section, setSection] = useState("quotes");
   const [inbox, setInbox] = useState(null);
@@ -128,8 +128,9 @@ function Workspace({ token, initialUser, onSignOut }) {
         {error && <Alert severity="error" onClose={() => setError("")} sx={{ mb: 2 }}>{error}</Alert>}{notice && <Alert severity="info" role="status" onClose={() => setNotice("")} sx={{ mb: 2 }}>{notice}</Alert>}
         {section === "quotes" && <Stack spacing={3}>
           {me.quota_remaining <= 2 && <Alert severity={me.quota_remaining === 0 ? "warning" : "info"} action={<Button color="inherit" onClick={() => navigate("settings")}>Manage usage</Button>}>{me.quota_remaining === 0 ? "Your parse allowance is used up. You can still check and export saved quotes." : `${me.quota_remaining} parses left. Each uploaded file or pasted quote uses one parse.`}</Alert>}
-          <Box sx={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: { xs: 1, sm: 2 } }}>{[["Recent quotes", inbox === null ? null : shown.length, "Uploads, Telegram, and email"], ["To check", inbox === null ? null : shown.length - checked, "Your next step before export"], ["Checked", inbox === null ? null : checked, "Ready to prepare for your client"]].map(([label, count, hint]) => <Paper key={label} sx={{ ...panel, p: { xs: 1.5, md: 3 }, py: { md: 2.3 } }}><Typography variant="body2" color="text.secondary" sx={{ fontSize: { xs: 12, sm: 14 } }}>{label}</Typography>{count === null ? <Skeleton width={60} height={48} /> : <Typography sx={{ fontSize: { xs: 26, sm: 32 }, fontWeight: 650, letterSpacing: "-.04em", my: .5 }}>{count}</Typography>}<Typography variant="caption" color="text.secondary" sx={{ display: { xs: "none", sm: "block" } }}>{hint}</Typography></Paper>)}</Box>
+          <Box sx={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: { xs: 1, sm: 2 } }}>{[["Recent quotes", inbox === null ? null : shown.length, "Uploads, WhatsApp, Telegram, and email"], ["To check", inbox === null ? null : shown.length - checked, "Your next step before export"], ["Checked", inbox === null ? null : checked, "Ready to prepare for your client"]].map(([label, count, hint]) => <Paper key={label} sx={{ ...panel, p: { xs: 1.5, md: 3 }, py: { md: 2.3 } }}><Typography variant="body2" color="text.secondary" sx={{ fontSize: { xs: 12, sm: 14 } }}>{label}</Typography>{count === null ? <Skeleton width={60} height={48} /> : <Typography sx={{ fontSize: { xs: 26, sm: 32 }, fontWeight: 650, letterSpacing: "-.04em", my: .5 }}>{count}</Typography>}<Typography variant="caption" color="text.secondary" sx={{ display: { xs: "none", sm: "block" } }}>{hint}</Typography></Paper>)}</Box>
           {!!pack.records.length && <Paper sx={{ ...panel, bgcolor: "surface.blue", borderColor: "surface.blueBorder" }}><Stack direction={{ xs: "column", lg: "row" }} justifyContent="space-between" gap={2} alignItems={{ lg: "center" }}><Box><Typography variant="h2">Your current client pack</Typography><Typography variant="body2" color="text.secondary" sx={{ mt: .5 }}>{packRecords.length - packUnchecked.length} of {packRecords.length} quotes checked. {packUnchecked.length ? "Check each quote before exporting the pack." : "All quotes checked. Your pack is ready to export."}</Typography></Box><Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>{packUnchecked.length ? <Button variant="contained" onClick={() => setSelected(packUnchecked[0])}>Check next quote <ArrowForward sx={{ ml: 1, fontSize: 16 }} /></Button> : <><Button variant="outlined" disabled={!!busy} onClick={() => exportPack("xlsx")}>Excel pack</Button><Button variant="contained" disabled={!!busy} startIcon={<DownloadOutlined />} onClick={() => exportPack("pdf")}>PDF pack</Button></>}</Stack></Stack></Paper>}
+          <OperationsSummary token={token} />
           <QuoteInbox inbox={inbox} shown={shown} visible={visible} error={inboxError} updatedAt={updatedAt} busy={!!busy} refresh={() => perform("refresh", () => refresh())} filter={filter} onFilter={setFilter} search={search} onSearch={setSearch} onOpen={setSelected} onAdd={() => addQuote()} onConnect={() => navigate("connections")} />
           <Typography variant="caption" color="text.secondary">Quote totals stay in their original currencies. Open a quote for its NGN cash estimate.</Typography>
         </Stack>}
@@ -145,20 +146,4 @@ function Workspace({ token, initialUser, onSignOut }) {
   </Box>;
 }
 
-export default function HomePage() {
-  const [session, setSession] = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
-  const checkSession = useCallback(async () => {
-    setLoading(true); setError("");
-    const token = window.localStorage.getItem("quote_token");
-    if (!token) { setLoading(false); return; }
-    try { const user = await request(token, "/v1/me"); setSession({ ...user, token }); }
-    catch (err) { if (err.status === 401) window.localStorage.removeItem("quote_token"); else setError(err.message); }
-    finally { setLoading(false); }
-  }, []);
-  useEffect(() => { checkSession(); }, [checkSession]);
-  if (loading || error) return <Container maxWidth="sm" sx={{ py: 12, textAlign: "center" }}>{loading ? <><CircularProgress size={28} /><Typography role="status" sx={{ mt: 2 }}>Opening your workspace…</Typography></> : <Alert severity="error" action={<Button color="inherit" onClick={checkSession}>Retry</Button>}>{error}</Alert>}</Container>;
-  if (!session) return <Auth onSession={setSession} />;
-  return <Workspace key={session.id} token={session.token} initialUser={session} onSignOut={() => { window.localStorage.removeItem("quote_token"); setSession(null); window.location.hash = ""; }} />;
-}
+

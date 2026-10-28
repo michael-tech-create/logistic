@@ -53,10 +53,10 @@ export function filterRecords(records, search, filter) {
 }
 
 export function validateFiles(files, quota) {
-  if (!files.length) return "Choose at least one PDF or TXT file.";
+  if (!files.length) return "Choose at least one PDF, text, image, or audio file.";
   if (files.length > quota) return `You have ${quota} parses left. Choose fewer files or add more parses in Settings.`;
   for (const file of files) {
-    if (!/\.(pdf|txt)$/i.test(file.name)) return `${file.name}: choose a PDF or TXT file.`;
+    if (!/\.(pdf|txt|png|jpe?g|webp|mp3|m4a|wav|ogg|opus|aac)$/i.test(file.name)) return `${file.name}: choose a PDF, TXT, image, or audio file.`;
     if (file.size > 10 * 1024 * 1024) return `${file.name}: the maximum file size is 10 MB.`;
     if (!file.size) return `${file.name} is empty. Choose a file with quote details.`;
   }
@@ -64,17 +64,19 @@ export function validateFiles(files, quota) {
 }
 
 export async function request(token, path, options = {}) {
+  const { timeout = 120000, ...rest } = options;
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 120000);
+  const timer = setTimeout(() => controller.abort(), timeout);
   try {
     const response = await fetch(`${API}${path}`, {
-      ...options,
-      signal: options.signal || controller.signal,
+      ...rest,
+      signal: rest.signal || controller.signal,
       headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}), ...(options.body && !(options.body instanceof FormData) ? { "Content-Type": "application/json" } : {}), ...options.headers },
     });
     if (!response.ok) {
       const payload = await response.json().catch(() => ({}));
-      const detail = typeof payload.detail === "string" ? payload.detail : response.status >= 500
+      const detail = typeof payload.detail === "string" ? payload.detail : Array.isArray(payload.detail)
+        ? payload.detail.slice(0, 3).map((item) => `${(item.loc || []).filter((part) => part !== "body").join(" / ")}: ${item.msg || "Check this value"}`).join(". ") : response.status >= 500
         ? "The desk API is unavailable. If you’re running locally, restart with npm run dev in dashboard to start both the API and website. Otherwise, try again shortly."
         : "The request could not be completed. Please try again.";
       const error = new Error(response.status === 401 && token ? "Your session has expired. Sign out and sign in again." : detail);
