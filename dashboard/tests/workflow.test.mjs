@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { filterRecords, mergeRecords, missingDetails, money, request, reviewStatusOf, statusOf, validateFiles } from "../app/workflow.mjs";
+import { ensureServiceReady, filterRecords, mergeRecords, missingDetails, money, request, reviewStatusOf, statusOf, validateFiles } from "../app/workflow.mjs";
 
 const quote = (id, currency = "USD") => ({ record_id: id, commercial: { vendor_name: "Carrier", quote_reference_id: "REPEATED", currency, total_amount: 100 }, movement: { origin: { location_name: "Shanghai" }, destination: { location_name: "Lagos" } }, line_items: [{ description: "Freight", amount: 100 }] });
 
@@ -48,13 +48,13 @@ test("money keeps currencies explicit and never invents a missing zero", () => {
 test("network failure provides a retry message instead of leaving a silent spinner", async () => {
   const original = globalThis.fetch;
   globalThis.fetch = async () => { throw new TypeError("Failed to fetch"); };
-  try { await assert.rejects(request("fixture", "/v1/inbox"), /Check your connection/); }
+  try { await assert.rejects(request("fixture", "/v1/inbox", { retryDelay: 0 }), /Check your connection/); }
   finally { globalThis.fetch = original; }
 });
 test("a failed API proxy explains recovery rather than reporting a generic sign-in error", async () => {
   const original = globalThis.fetch;
   globalThis.fetch = async () => new Response("Proxy unavailable", { status: 500 });
-  try { await assert.rejects(request("", "/v1/auth/login"), /desk API is unavailable/); }
+  try { await assert.rejects(request("", "/v1/auth/login"), /couldn’t connect to your workspace/); }
   finally { globalThis.fetch = original; }
 });
 test("server errors and quota status are preserved for recovery", async () => {
@@ -81,5 +81,31 @@ test("incorrect login credentials are not described as an expired session", asyn
   const original = globalThis.fetch;
   globalThis.fetch = async () => new Response(JSON.stringify({ detail: "Email or password is wrong." }), { status: 401 });
   try { await assert.rejects(request("", "/v1/auth/login"), /Email or password is wrong/); }
+  finally { globalThis.fetch = original; }
+});
+
+
+test("temporary gateway failures recover for reads", async () => {
+  const original = globalThis.fetch; let calls = 0;
+  globalThis.fetch = async () => ++calls < 3 ? new Response("Starting", { status: 503 }) : Response.json({ records: [] });
+  try { assert.deepEqual(await request("fixture", "/v1/inbox", { retryDelay: 0 }), { records: [] }); assert.equal(calls, 3); }
+  finally { globalThis.fetch = original; }
+});
+test("a failed submission is never automatically repeated", async () => {
+  const original = globalThis.fetch; let calls = 0;
+  globalThis.fetch = async () => { calls++; return new Response("Unavailable", { status: 503 }); };
+  try { await assert.rejects(request("fixture", "/v1/auth/register", { method: "POST", body: "{}", retryDelay: 0 }), /couldn’t connect/); assert.equal(calls, 1); }
+  finally { globalThis.fetch = original; }
+});
+test("readiness waits for a healthy API before allowing submission", async () => {
+  const original = globalThis.fetch; let calls = 0;
+  globalThis.fetch = async (url) => { assert.ok(url.endsWith("/health")); return ++calls < 2 ? new Response("Starting", { status: 502 }) : Response.json({ ok: true }); };
+  try { await ensureServiceReady({ retryDelay: 0 }); assert.equal(calls, 2); }
+  finally { globalThis.fetch = original; }
+});
+test("readiness stops on timeout and retains an actionable message", async () => {
+  const original = globalThis.fetch;
+  globalThis.fetch = (_url, { signal }) => new Promise((_resolve, reject) => signal.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), { once: true }));
+  try { await assert.rejects(ensureServiceReady({ timeout: 30, retryDelay: 0 }), /entries are still here/); }
   finally { globalThis.fetch = original; }
 });

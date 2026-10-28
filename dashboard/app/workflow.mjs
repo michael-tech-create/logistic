@@ -64,33 +64,72 @@ export function validateFiles(files, quota) {
 }
 
 export async function request(token, path, options = {}) {
-  const { timeout = 120000, ...rest } = options;
+  const { timeout = 120000, retryDelay = 1000, download = false, ...rest } = options;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeout);
   try {
-    const response = await fetch(`${API}${path}`, {
-      ...rest,
-      signal: rest.signal || controller.signal,
-      headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}), ...(options.body && !(options.body instanceof FormData) ? { "Content-Type": "application/json" } : {}), ...options.headers },
-    });
+    const signal = rest.signal ? AbortSignal.any([rest.signal, controller.signal]) : controller.signal;
+    const safeRead = ["GET", "HEAD"].includes((rest.method || "GET").toUpperCase());
+    let response;
+    for (let attempt = 0; ; attempt++) {
+      try {
+        response = await fetch(`${API}${path}`, {
+          ...rest, signal,
+          headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}), ...(options.body && !(options.body instanceof FormData) ? { "Content-Type": "application/json" } : {}), ...options.headers },
+        });
+        if (!safeRead || ![502, 503, 504].includes(response.status) || attempt >= 2) break;
+        await response.body?.cancel();
+      } catch (error) {
+        if (!safeRead || !(error instanceof TypeError) || attempt >= 2 || signal.aborted) throw error;
+      }
+      await pause(retryDelay, signal);
+    }
     if (!response.ok) {
       const payload = await response.json().catch(() => ({}));
       const detail = typeof payload.detail === "string" ? payload.detail : Array.isArray(payload.detail)
         ? payload.detail.slice(0, 3).map((item) => `${(item.loc || []).filter((part) => part !== "body").join(" / ")}: ${item.msg || "Check this value"}`).join(". ") : response.status >= 500
-        ? "The desk API is unavailable. If you’re running locally, restart with npm run dev in dashboard to start both the API and website. Otherwise, try again shortly."
+        ? "We couldn’t connect to your workspace. Please wait a moment and try again. Your entries are still here."
         : "The request could not be completed. Please try again.";
       const error = new Error(response.status === 401 && token ? "Your session has expired. Sign out and sign in again." : detail);
       error.status = response.status;
       throw error;
     }
-    return options.download ? response.blob() : response.json();
+    return download ? response.blob() : response.json();
   } catch (error) {
-    if (error.name === "AbortError") throw new Error("This is taking longer than expected. Your service may be starting up. Please try again shortly.");
+    if (error.name === "AbortError") throw new Error("Connecting is taking longer than expected. Please wait a moment and try again. Your entries are still here.");
     if (error instanceof TypeError) throw new Error("Could not reach the desk. Check your connection and try again. Your input is still here.");
     throw error;
   } finally {
     clearTimeout(timer);
   }
+}
+
+function pause(milliseconds, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) { reject(new DOMException("Aborted", "AbortError")); return; }
+    const onAbort = () => { clearTimeout(timer); reject(new DOMException("Aborted", "AbortError")); };
+    const timer = setTimeout(() => { signal.removeEventListener("abort", onAbort); resolve(); }, milliseconds);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+// Only the read-only health request is repeated. Never replay form submissions.
+export async function ensureServiceReady({ timeout = 60000, retryDelay = 1500 } = {}) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeout);
+  try {
+    while (!controller.signal.aborted) {
+      try {
+        const response = await fetch(`${API}/health`, { cache: "no-store", signal: AbortSignal.any([controller.signal, AbortSignal.timeout(8000)]) });
+        const body = await response.json().catch(() => null);
+        if (response.ok && body?.ok === true) return;
+        if (response.status === 404) break;
+      } catch { if (controller.signal.aborted) break; }
+      await pause(retryDelay, controller.signal);
+    }
+  } catch { /* A bounded readiness check leaves the form intact. */ }
+  finally { clearTimeout(timer); }
+  throw new Error("We couldn’t connect to your workspace yet. Please wait a moment and try again. Your entries are still here.");
 }
 
 export function saveDownload(blob, filename) {

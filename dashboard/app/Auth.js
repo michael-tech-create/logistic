@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { Alert, Avatar, Box, Button, Stack, TextField, Typography } from "@mui/material";
 import Brand from "./Brand";
-import { request } from "./workflow.mjs";
+import { ensureServiceReady, request } from "./workflow.mjs";
 
 export default function Auth({ onSession }) {
   const [mode, setMode] = useState("login");
@@ -21,6 +21,9 @@ export default function Auth({ onSession }) {
     if (mode === "forgot-password" && seconds > 0) return;
     setBusy(true); setError(""); setNotice("");
     try {
+      setNotice("Connecting to your workspace… This may take a moment.");
+      await ensureServiceReady();
+      setNotice("");
       if (mode === "forgot-password") {
         const result = await request("", "/v1/auth/forgot-password", { method: "POST", body: JSON.stringify({ email: form.email }) });
         setNotice(result.message); setResendAt(Date.now() + 60000); return;
@@ -33,7 +36,7 @@ export default function Auth({ onSession }) {
       location.searchParams.delete("mode");
       window.history.replaceState(null, "", `${location.pathname}${location.search}${location.hash}`);
       onSession(session);
-    } catch (err) { setError(err.message); } finally { setBusy(false); }
+    } catch (err) { setNotice(""); setError(err.message); } finally { setBusy(false); }
   }
   return <Box sx={{ minHeight: "100vh", display: "grid", gridTemplateColumns: { xs: "1fr", md: "1fr 1fr" }, gridTemplateRows: { xs: "auto 1fr", md: "1fr" } }}>
     <Box sx={{ background: "radial-gradient(ellipse at 10% 15%, #e7f1fc, transparent 65%), linear-gradient(145deg, #f8fbfd, #eff5fa)", color: "text.primary", borderRight: { md: "1px solid #dce3e8" }, borderBottom: { xs: "1px solid #dce3e8", md: 0 }, p: { xs: 3, md: 8 }, display: "flex", flexDirection: "column", justifyContent: "space-between", gap: 5 }}>
@@ -44,7 +47,7 @@ export default function Auth({ onSession }) {
     <Box component="main" sx={{ display: "grid", placeItems: "center", p: { xs: 2, md: 6 } }}><Box sx={{ width: "100%", maxWidth: 440, bgcolor: "background.paper", p: { xs: 3, sm: 4 }, border: 1, borderColor: "divider", borderRadius: 3, boxShadow: "0 18px 55px #263e5310" }}>
       <Typography variant="overline" color="text.secondary">YOUR WORKSPACE</Typography><Typography component="h2" variant="h4" sx={{ mt: 1, mb: 1 }}>{mode === "forgot-password" ? "Reset your password" : mode === "login" ? "Welcome back" : "Open your clearing desk"}</Typography><Typography variant="body2" color="text.secondary" sx={{ mb: 4 }}>{mode === "forgot-password" ? "Enter your work email and we’ll send you a link to choose a new password." : mode === "login" ? "Sign in to pick up where you left off." : "Start with 5 trial parses. Check your first quote before choosing a plan."}</Typography>
       {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
-      {notice && <Alert severity="success" role="status" sx={{ mb: 2 }}>{notice}</Alert>}
+      {notice && <Alert severity={busy ? "info" : "success"} role="status" sx={{ mb: 2 }}>{notice}</Alert>}
       <Stack component="form" spacing={2.5} onSubmit={submit}>
         {mode === "register" && <><TextField label="Business name" required autoComplete="organization" value={form.business_name} onChange={(e) => setForm({ ...form, business_name: e.target.value })} disabled={busy} /><TextField label="Home country" required autoComplete="country-name" value={form.home_country} onChange={(e) => setForm({ ...form, home_country: e.target.value })} disabled={busy} /></>}
         <TextField label="Work email" type="email" required autoComplete="username" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} disabled={busy} />{mode !== "forgot-password" && <TextField label="Password" type="password" required autoComplete={mode === "login" ? "current-password" : "new-password"} value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} disabled={busy} />}

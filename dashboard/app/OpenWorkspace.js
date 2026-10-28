@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import dynamic from "next/dynamic";
 import { Alert, Button, CircularProgress, Container, Typography } from "@mui/material";
 import Auth from "./Auth";
-import { request } from "./workflow.mjs";
+import { ensureServiceReady, request } from "./workflow.mjs";
 
 const PROFILE = "quote_profile";
 const Workspace = dynamic(() => import("./DeskApp"), {
@@ -48,7 +48,7 @@ export default function OpenWorkspace() {
     const workspace = import("./DeskApp");
     const cached = readProfile();
     if (cached) { setSession({ ...cached, token }); setPhase("ready"); }
-    request(token, "/v1/me", { timeout: 12000 }).then((user) => {
+    ensureServiceReady().then(() => request(token, "/v1/me", { timeout: 12000 })).then((user) => {
       if (!active) return;
       remember(user);
       setSession({ ...user, token });
