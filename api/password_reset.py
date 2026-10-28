@@ -34,8 +34,13 @@ def reset_page_url() -> str:
 
 
 def ensure_email_ready() -> str:
-    if not os.environ.get("SMTP_HOST") or not (os.environ.get("SMTP_FROM") or os.environ.get("SMTP_USER")):
-        raise RuntimeError("Password recovery email is not available yet. Please contact your workspace administrator.")
+    from email_delivery import delivery_method
+
+    try:
+        delivery_method()
+    except RuntimeError as exc:
+        logger.warning("Password recovery email configuration is incomplete.")
+        raise RuntimeError("Password recovery email is not available yet. Please contact your workspace administrator.") from exc
     page_url = reset_page_url()
     store.ensure_password_reset_ready()
     return page_url

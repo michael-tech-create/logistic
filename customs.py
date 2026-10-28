@@ -73,7 +73,7 @@ def customs_lane(home_country: str | None, origin: str | None, destination: str 
 
 
 def _sum_category(result: QuoteExtractionResult, category: str) -> float:
-    return round(sum(item.amount for item in result.financials.line_items if item.category == category), 2)
+    return round(sum(item.amount for item in result.financials.line_items if item.category == category and (item.currency or result.financials.currency) == result.financials.currency), 2)
 
 
 def to_customs_record(result: QuoteExtractionResult, business: dict[str, Any]) -> dict[str, Any]:
@@ -247,7 +247,7 @@ def format_notice(record: dict[str, Any]) -> str:
         heard_charges = []
         currency = (record.get("commercial") or {}).get("currency") or ""
         for item in record.get("line_items") or []:
-            heard_charges.append(f"- {item.get('description')}: {currency} {float(item.get('amount') or 0):,.0f}")
+            heard_charges.append(f"- {item.get('description')}: {item.get('currency') or currency} {float(item.get('amount') or 0):,.0f}")
         return "\n".join([
             f"{record['business']['legal_name']}",
             "I could not price this message.",
@@ -305,12 +305,8 @@ def format_notice(record: dict[str, Any]) -> str:
     if fee:
         lines.append(f"Platform fee share {fee:.1%} of the all-in total. No money was sent.")
     duty = record.get("duty_estimate") or {}
-    if duty.get("total_ngn"):
-        lines.append(
-            f"HS {duty['hs_code']} estimate NGN {duty['total_ngn']:,.0f} "
-            f"(duty {duty['import_duty_ngn']:,.0f}, ETLS {duty['etls_ngn']:,.0f}, "
-            f"CISS {duty['ciss_ngn']:,.0f}, VAT {duty['vat_ngn']:,.0f}). Not an NCS assessment."
-        )
+    if duty.get("status") == "calculated":
+        lines.append(f"HS {duty['hs_code']} sourced estimate NGN {duty['total_ngn']:,.0f}. Final assessment remains with Customs.")
     elif duty.get("hs_code"):
         lines.append(f"HS {duty['hs_code']} recognised. {duty.get('reason') or ''}".strip())
     if record.get("extraction_flags"):

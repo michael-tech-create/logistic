@@ -72,7 +72,7 @@ export default function QuoteDialog({ token, record, onClose, onUpdate, onCorrec
           </Box>
           <Box>
             <Typography variant="h2" sx={{ mb: 1.5 }}>Charge breakdown</Typography>
-            {record.fx?.mixed && <Alert severity="info" sx={{ mb: 2 }}>Mixed currencies: the quote total contains local NGN charges. USD freight is kept separately in the cash estimate below.</Alert>}
+            {record.currency_totals && <Alert severity="info" sx={{ mb: 2 }}>Separate currency subtotals: {Object.entries(record.currency_totals).map(([code, amount]) => money(code, amount)).join(" + ")}. The cash estimate converts these amounts before combining them.</Alert>}
             <TableContainer><Table size="small" aria-label="Quote charge breakdown"><TableHead><TableRow><TableCell>Description</TableCell><TableCell>Category</TableCell><TableCell align="right">Amount</TableCell></TableRow></TableHead>
               <TableBody>{(record.line_items || []).map((item, index) => <TableRow key={index}><TableCell>{item.description}</TableCell><TableCell>{item.category}</TableCell><TableCell align="right" sx={{ whiteSpace: "nowrap" }}>{money(item.currency || commercial.currency, item.amount)}</TableCell></TableRow>)}
                 <TableRow><TableCell colSpan={2} sx={{ fontWeight: 700 }}>Quoted total</TableCell><TableCell align="right" sx={{ fontWeight: 700, whiteSpace: "nowrap" }}>{money(commercial.currency, commercial.total_amount)}</TableCell></TableRow>

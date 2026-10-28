@@ -81,6 +81,10 @@ def login(email: str, password: str) -> dict:
     user = _one(f"users?email=eq.{urllib_quote(email.lower().strip())}&select=*")
     if user is None or not _check_password(password, user["password_hash"]):
         raise ValueError("Email or password is wrong.")
+    return open_session(user)
+
+
+def open_session(user: dict) -> dict:
     token = secrets.token_urlsafe(32)
     _insert("sessions", {"token": token, "user_id": user["id"], "created_at": int(time.time())})
     public = public_user(user)

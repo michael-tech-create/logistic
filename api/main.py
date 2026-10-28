@@ -11,6 +11,7 @@ import os
 import re
 import secrets
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
@@ -41,6 +42,7 @@ from api.store import (
     grant_plan,
     load_batch,
     login,
+    open_session,
     port_risk_level,
     public_user,
     register,
@@ -174,13 +176,23 @@ def enforce_plan_quota(user: dict, count: int = 1) -> None:
 
 
 def _parse_for_user(user: dict, text: str) -> dict:
+    started = time.perf_counter()
     enforce_plan_quota(user, 1)
+    quote = parse_quote_smart(text)
+    business = _business(user)
+    record = enrich(to_customs_record(quote, business), business)
+    if not record.get("line_items"):
+        raise HTTPException(400, "No priced charges were found. Add amounts and currencies to the quote.")
     try:
         consume(user["id"], 1)
     except PermissionError as exc:
         raise HTTPException(402, str(exc)) from exc
-    quote = parse_quote_smart(text)
-    return enrich(to_customs_record(quote, _business(user)), _business(user))
+    from duty import estimate_duty
+    from shipment_costs import source_hints
+    record["duty_estimate"] = estimate_duty(text, record)
+    record["shipment_hints"] = source_hints(text)
+    record["processing"] = {"milliseconds": round((time.perf_counter() - started) * 1000), "scope": "quote preparation; excludes queue, delivery, export, and human review"}
+    return record
 
 
 @app.get("/health")
@@ -401,8 +413,7 @@ def auth_register(body: RegisterBody):
         raise HTTPException(400, str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(503, str(exc)) from exc
-    session = login(body.email, body.password)
-    return session
+    return open_session(user)
 
 
 @app.post("/v1/auth/login")
@@ -492,27 +503,27 @@ async def parse_batch(
         raise HTTPException(400, "Upload at least one .pdf or .txt quote.")
     enforce_plan_quota(user, len(files))
     sources = []
+    from media_intake import read_document
     for upload in files:
         raw = await upload.read(10 * 1024 * 1024 + 1)
         name = (upload.filename or "quote").lower()
-        if not name.endswith((".pdf", ".txt")):
-            raise HTTPException(400, f"{upload.filename}: choose a PDF or TXT file.")
         if len(raw) > 10 * 1024 * 1024:
             raise HTTPException(400, f"{upload.filename}: the maximum file size is 10 MB.")
-        if name.endswith(".pdf"):
-            try:
-                text = await run_in_threadpool(pdf_to_text, raw)
-            except Exception as exc:
-                raise HTTPException(400, f"{upload.filename}: this PDF could not be read. Upload a readable PDF or paste its quote text.") from exc
-        else:
-            text = raw.decode("utf-8", errors="replace")
-        if not text.strip():
-            raise HTTPException(400, f"No text found in {upload.filename}. For a scanned PDF, use Telegram photo intake or paste its text.")
-        sources.append((upload.filename, text))
+        started = time.perf_counter()
+        try:
+            text = await run_in_threadpool(read_document, raw, name, upload.content_type or "")
+        except ValueError as exc:
+            raise HTTPException(400, f"{upload.filename}: {exc}") from exc
+        except Exception as exc:
+            raise HTTPException(503, "The document reader is unavailable. Try again or paste the quote text. No parse was charged for this file.") from exc
+        sources.append((upload.filename, text, round((time.perf_counter() - started) * 1000)))
     records = []
-    for filename, text in sources:
+    for filename, text, reading_ms in sources:
         record = await run_in_threadpool(_parse_for_user, user, text)
         record["source_file"] = filename
+        record["source_channel"] = "upload"
+        record["processing"]["milliseconds"] += reading_ms
+        record["processing"]["scope"] = "attachment reading and quote preparation; excludes queue, delivery, export, and human review"
         await run_in_threadpool(_save_desk_quote, record, user, source_text=text)
         records.append(record)
     batch_id = secrets.token_urlsafe(12)
@@ -917,3 +928,7 @@ async def mcp(request: Request, x_api_key: str | None = Header(default=None)):
     else:
         result = {}
     return {"jsonrpc": "2.0", "id": rpc_id, "result": result}
+
+# Imported after core helpers so channel workers can reuse ownership checks.
+from api.operations import router as operations_router
+app.include_router(operations_router)

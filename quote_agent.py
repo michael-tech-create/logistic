@@ -50,9 +50,9 @@ Rules:
   Destination THC and delivery are Destination Charge.
   BAF, LSS, and peak-season surcharges are Fuel / Surcharge.
   Duties, taxes, and brokerage are Customs / Tax.
-- If no total is stated, sum the detail lines.
+- If no total is stated, sum only detail lines in the financials.currency.
 - Never add a SUBTOTAL, grand total, or "total local" line on top of the detail lines.
-- Keep a USD freight amount out of an NGN total. Put that in extraction_flags.
+- Preserve every charge in line_items with its own currency. Never add unlike currencies to one total.
 - Do not invent a vendor, route, incoterm, or total.
 - If the message is a previous bot reply, a greeting, or has no real charge lines, return no line items and total_amount 0.
 - A real charge looks like "Import Surface Duty NGN 12,500,000" or "Ocean Freight: $2,400".
@@ -113,6 +113,7 @@ class LineItem(BaseModel):
     amount: float
     unit: Optional[str] = None
     category: Category
+    currency: Optional[str] = None
 
 
 class Financials(BaseModel):
@@ -182,9 +183,9 @@ def _money(raw: str) -> tuple[Optional[float], Optional[str]]:
         if sym in raw:
             symbol = code
             break
-    code_match = re.search(r"\b(USD|EUR|GBP|NGN)\b", raw, re.I)
+    code_match = re.search(r"\b(USD|EUR|GBP|NGN|CNY)\b", raw, re.I)
     code = code_match.group(1).upper() if code_match else symbol
-    amount_match = re.search(r"(\d{1,3}(?:,\d{3})*|\d+)(?:\.(\d{1,2}))?", raw)
+    amount_match = re.search(r"(\d{1,3}(?:,\d{3})+|\d+)(?:\.(\d{1,2}))?", raw)
     if not amount_match:
         return None, code
     return float(amount_match.group(0).replace(",", "")), code
@@ -396,7 +397,7 @@ def parse_freight_quote(raw_quote_text: str) -> QuoteExtractionResult:
                     "it could also be read as a customs brokerage fee."
                 )
             line_items.append(
-                LineItem(description=desc.strip(), amount=amount, unit=None, category=category)
+                LineItem(description=desc.strip(), amount=amount, unit=None, category=category, currency=code)
             )
             if "per " not in money_raw.lower():
                 pass
@@ -431,7 +432,7 @@ def parse_freight_quote(raw_quote_text: str) -> QuoteExtractionResult:
                 if currency and code != currency:
                     flags.append(f"Kept {desc} as {code} {amount:,.2f} beside the {currency} lines.")
                 currency = "NGN" if code == "NGN" else (currency or code)
-                line_items.append(LineItem(description=desc, amount=amount, unit=None, category=_categorize(desc)))
+                line_items.append(LineItem(description=desc, amount=amount, unit=None, category=_categorize(desc), currency=code))
         if line_items:
             flags.append("Read prices from lines that included NGN or USD amounts.")
     if not line_items:
@@ -449,7 +450,9 @@ def parse_freight_quote(raw_quote_text: str) -> QuoteExtractionResult:
     if total_match:
         stated_total, total_code = _money(total_match.group(1))
         currency = total_code or currency
-    item_sum = round(sum(item.amount for item in line_items), 2)
+    for item in line_items:
+        item.currency = item.currency or currency or "USD"
+    item_sum = round(sum(item.amount for item in line_items if item.currency == (currency or "USD")), 2)
     if stated_total is None:
         stated_total = item_sum
         if line_items:
@@ -585,28 +588,22 @@ def _annotate_place(place: Location) -> None:
 
 
 def _split_mixed_currency(quote: QuoteExtractionResult) -> QuoteExtractionResult:
-    """Keep a small ocean freight in USD and leave Nigerian port charges in NGN."""
-    usd_items: list[LineItem] = []
-    ngn_items: list[LineItem] = []
+    """Preserve explicit currencies and never infer them from amount size."""
+    totals = {}
     for item in quote.financials.line_items:
-        freight = any(word in item.description.lower() for word in ("ocean freight", "sea freight", "base freight"))
-        if freight and item.amount < 100_000:
-            usd_items.append(item)
-        elif item.amount >= 100_000:
-            ngn_items.append(item)
-        elif quote.financials.currency == "NGN":
-            ngn_items.append(item)
-        else:
-            usd_items.append(item)
+        item.currency = (item.currency or quote.financials.currency).upper()
+        totals[item.currency] = totals.get(item.currency, 0) + item.amount
     _annotate_place(quote.shipment_details.origin)
     _annotate_place(quote.shipment_details.destination)
-    if not (usd_items and ngn_items):
+    if len(totals) < 2:
         return quote
-    quote.financials.line_items = ngn_items
-    quote.financials.currency = "NGN"
-    quote.financials.total_amount = round(sum(item.amount for item in ngn_items), 2)
-    usd_total = round(sum(item.amount for item in usd_items), 2)
-    quote.extraction_flags.append(f"USD freight kept separate: USD {usd_total:,.2f}.")
+    primary = "NGN" if "NGN" in totals else quote.financials.currency
+    if primary not in totals: primary = next(iter(totals))
+    quote.financials.currency = primary
+    quote.financials.total_amount = round(totals[primary], 2)
+    quote.extraction_flags.append("Separate currency subtotals: " + "; ".join(f"{code} {amount:,.2f}" for code, amount in totals.items()) + ". Do not add unlike currencies.")
+    if set(totals) == {"USD", "NGN"}:
+        quote.extraction_flags.append(f"USD freight kept separate: USD {totals['USD']:,.2f}.")
     return quote
 
 
@@ -762,6 +759,7 @@ def _coerce_quote_payload(data: dict) -> dict:
             "amount": number,
             "unit": item.get("unit"),
             "category": _category(item.get("category")),
+            "currency": (item.get("currency") or money.get("currency") or data.get("currency") or "USD").upper(),
         })
     total = money.get("total_amount", data.get("total_amount", data.get("total")))
     if total in (None, ""):

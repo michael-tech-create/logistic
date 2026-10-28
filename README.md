@@ -61,7 +61,7 @@ New accounts get 5 trial parses. Paystack then offers two monthly plans: ₦15,0
 2. `quote_agent.py` extracts the vendor, dates, currency, and charge lines. Gemini is tried first when keys are configured. The rules parser covers the rest.
 3. `customs.py` assigns a lane: export, import, cross-trade, domestic, or unknown. The home country comes from the business profile. Incoterms are taken from the document only.
 4. `market.py` adds the naira and yuan view, a 2% duty-finance estimate when duty is present, a demurrage buffer from the desk port-risk setting, and a 70/15/12/3 split across the shipping line, trucker, clearing agent, and platform fee.
-5. `duty.py` adds an HS-code estimate when the text names a known commodity or already contains an 8-digit code. The lines are import duty, import adjustment tax when the table has one, ETLS 0.5%, CISS 1%, and VAT 7.5%.
+5. `duty.py` flags missing customs inputs without assuming rates. The quote dialog calculates customs estimates from confirmed goods valuation, dated FX, and an operator-reviewed tariff profile; `shipment_costs.py` also calculates free-time and tiered shipment charges.
 6. The record is stored under `state/records/` before Telegram shows its buttons. The user checks the extracted details before downloads become available. An email copy is sent after the check when SMTP is configured.
 7. Telegram updates are saved to `state/telegram_jobs.sqlite` before polling acknowledges them, or authenticated webhook intake returns HTTP 200. Workers process files and text in order within each chat, allowing other chats to proceed independently. Drafts and file-backed FX caches expire, and pending storage syncs are retried.
 
@@ -105,7 +105,7 @@ By default it opens `https://www.ptml-nigeria.com/`, takes the first vessel row,
 
 ## Supabase
 
-The login page includes **Forgot password?** with expiring email reset links. For an existing Supabase deployment, apply [`supabase/password_reset.sql`](supabase/password_reset.sql), configure outbound SMTP and the public `PASSWORD_RESET_URL`, and redeploy the API and dashboard. SQLite updates automatically. Setup and verification are in [docs/PASSWORD-RESET.md](docs/PASSWORD-RESET.md).
+The login page includes **Forgot password?** with expiring email reset links. For an existing Supabase deployment, apply [`supabase/password_reset.sql`](supabase/password_reset.sql), configure outbound Resend HTTPS (recommended on Render Free) or SMTP and the public `PASSWORD_RESET_URL`, and redeploy the API and dashboard. SQLite updates automatically. Setup and verification are in [docs/PASSWORD-RESET.md](docs/PASSWORD-RESET.md).
 
 For Paystack checkout errors such as `401 invalid_Key`, update `PAYSTACK_SECRET_KEY` on the Python API service, then restart it. Use `python paystack_diagnostics.py --live` for a read-only credential check. See [docs/PAYSTACK.md](docs/PAYSTACK.md).
 
@@ -119,7 +119,7 @@ On a checked quote, “pay the trucker” or `/pay` opens a confirmation for a p
 
 - Official USD/NGN comes from the open ExchangeRate-API mid-market feed unless you save `cbn_usd_ngn`. That feed is not the Central Bank customs assessment rate. If the feed is down, the desk uses the fallback official rate, which starts at 1,550 and can be changed on the desk or with `FX_FALLBACK_OFFICIAL_USD_NGN`. A missing parallel rate uses the fallback that starts at 1,650 (`FX_FALLBACK_PARALLEL_USD_NGN`) only when the quote is not already in naira.
 - Port risk is a desk setting: normal ₦350,000, elevated ₦900,000, severe ₦1,800,000. It is not a live congestion index.
-- The duty table is an estimate on the all-in naira figure. It is not an NCS assessment.
+- Customs estimates require a sourced tariff profile and explicit valuation. They are not an NCS assessment. Shipment charges require the carrier or terminal’s actual dates and rate schedule.
 - Duty finance, escrow, and payout plans on the desk are ledger rows. Paystack charges only the ₦15,000 or ₦50,000 subscription. No lender disburses funds.
 - The bot cannot pay a person or clear cargo until `PAYOUT_URL` and `CUSTOMS_CLEAR_URL` point at a real bank and a real customs system. Requests require human approval; without a provider, that approval is retained and nothing is sent.
 
@@ -147,7 +147,9 @@ automate.py          Telegram and email loop
 quote_agent.py       Rules parser and Gemini
 customs.py           Lane, notice text, business match
 market.py            FX, finance estimate, demurrage, split
-duty.py              HS and duty estimate
+shipment_costs.py    Sourced customs and shipment charge calculations
+whatsapp_intake.py   Linked WhatsApp intake and durable delivery jobs
+email_intake.py      Separate, deduplicated email attachment quotes
 supabase_sync.py     Remote insert
 api/                 FastAPI, billing, exports
 dashboard/           Clearing desk
@@ -203,3 +205,7 @@ To run the two processes on different hosts later, both need the same `state/` v
 ## Creator
 
 Michael Unogwu built this desk so a clearing business can take a quote from a chat, an inbox, or a file and answer with one priced record the client can read.
+
+## Expanded intake and cost workflow
+
+WhatsApp connections, email attachments, scanned/audio uploads, sourced customs calculations, shipment deadline checks, and performance measurements are described in [docs/OPERATIONS.md](docs/OPERATIONS.md). Apply [supabase/operations.sql](supabase/operations.sql) before enabling these on a Supabase deployment. Messaging/media credentials and reviewed tariff data must be supplied; five-second turnaround and business outcome guarantees are not established.

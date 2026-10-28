@@ -6,7 +6,7 @@ Legacy business:<id> prefixes cannot override the company linked to a chat.
 
 Email: IMAP inbox. A message is kept when the sender matches a business
 `inbound_emails` entry (full address or @domain). The normalized record is
-sent back with SMTP when SMTP_HOST is set, and copied to the business
+sent back over HTTPS when Resend is configured (or SMTP otherwise), and copied to the business
 Telegram chats when TELEGRAM_BOT_TOKEN is set.
 
 Environment:
@@ -14,6 +14,7 @@ Environment:
   IMAP_HOST IMAP_USER IMAP_PASSWORD  (IMAP_PORT defaults to 993)
   SMTP_HOST SMTP_USER SMTP_PASSWORD  (SMTP_PORT defaults to 587)
   SMTP_FROM
+  RESEND_API_KEY RESEND_FROM  (HTTPS alternative; preferred on Render Free)
 """
 
 from __future__ import annotations
@@ -43,6 +44,7 @@ load_dotenv(Path(__file__).resolve().parent / ".env")
 
 from customs import find_business, format_notice, load_businesses, to_customs_record
 from quote_agent import compose_client_reply, parse_quote_smart
+from email_delivery import delivery_method, send_via_resend
 
 ROOT = Path(__file__).resolve().parent
 STATE_DIR = ROOT / "state"
@@ -58,6 +60,7 @@ def ingest_text(
     email_from: str | None = None,
     business: dict | None = None,
 ) -> dict:
+    started = time.perf_counter()
     from api.store import company_businesses
 
     if business is None:
@@ -86,6 +89,9 @@ def ingest_text(
     from duty import estimate_duty
 
     record["duty_estimate"] = estimate_duty(text, record)
+    from shipment_costs import source_hints
+    record["shipment_hints"] = source_hints(text)
+    record["processing"] = {"milliseconds": round((time.perf_counter() - started) * 1000), "scope": "quote preparation; excludes attachment reading, queue, delivery, and human review"}
     notice = format_notice(record)
     if unassigned:
         notice += "\n\nThis chat is not linked yet. On the desk, copy /link and your company code, and send that here so the quote is filed under your agency."
@@ -622,6 +628,7 @@ def _handle_telegram_message(message: dict) -> None:
     if account and not already_charged and account["quota_remaining"] < 1:
         send_telegram(chat_id, "Your parse allowance is used up. Add parses in Settings on the desk. You can still use /status and export saved, checked quotes.", _menu_keyboard())
         return
+    preparation_started = time.perf_counter()
     if not text:
         send_telegram(chat_id, "I’m reading your file. I’ll show the extracted quote here, or tell you what needs fixing.")
         try:
@@ -647,6 +654,8 @@ def _handle_telegram_message(message: dict) -> None:
     send_telegram(chat_id, "I’m checking the route, charges, and currencies. I’ll ask for any missing detail next.")
     outcome = ingest_text(quote_text, business_id=business["id"], telegram_chat_id=chat_id, business=business)
     record = outcome["record"]
+    record["source_channel"] = "telegram"
+    record["processing"] = {"milliseconds": round((time.perf_counter() - preparation_started) * 1000), "scope": "attachment reading and quote preparation; excludes queue, delivery of the final result, export, and human review"}
     commercial = record.get("commercial") or {}
     movement = record.get("movement") or {}
     priced = bool(record.get("line_items")) and float(commercial.get("total_amount") or 0) > 0
@@ -762,7 +771,7 @@ def _callback(callback: dict, chat_id: str) -> None:
         record["desk_review"] = {"status": "reviewed", "reviewed_by": f"telegram:{(callback.get('from') or {}).get('id') or chat_id}", "reviewed_at": datetime.now(timezone.utc).isoformat()}
         _store_record(record, record_id, chat_id=chat_id)
         send_telegram(chat_id, "Quote checked and saved. Download a client file below. A payment or clearance still needs a separate request and approval on the desk.", _quote_keyboard(record_id, True))
-        if first_check and os.environ.get("SMTP_HOST"):
+        if first_check and (os.environ.get("SMTP_HOST") or os.environ.get("RESEND_API_KEY")):
             from workers import submit
             submit(_finish_quote, chat_id, {"record": record, "business": _chat_business(chat_id)}, "publish", None, record.get("source_text") or "", record, record_id, "")
         return
@@ -825,7 +834,7 @@ def _finish_quote(chat_id, outcome, decision, held, quote_text, record, record_i
         address = _notify_address(outcome)
         if address and send_email(address, f"Checked quote {(record.get('commercial') or {}).get('quote_reference_id') or record_id}", _client_letter(quote_text, outcome, decision, held)):
             send_telegram(chat_id, "An email copy was sent to your company’s notification address.")
-        elif address and os.environ.get("SMTP_HOST"):
+        elif address and (os.environ.get("SMTP_HOST") or os.environ.get("RESEND_API_KEY")):
             send_telegram(chat_id, "The quote is saved, but the email copy could not be sent. Downloads are still available here; check the email connection on the desk.")
     except Exception as exc:
         print(f"[intake] checked-quote email failed: {type(exc).__name__}")
@@ -887,9 +896,16 @@ def _imap_body(msg: email.message.Message) -> str:
 
 
 def send_email(to_address: str, subject: str, body: str) -> bool:
-    host = os.environ.get("SMTP_HOST")
-    if not host or not to_address:
+    if not to_address:
         return False
+    try:
+        method = delivery_method()
+    except RuntimeError:
+        print("[intake] email not sent: check backend email configuration")
+        return False
+    if method == "resend":
+        return send_via_resend(to_address, subject, body)
+    host = os.environ.get("SMTP_HOST")
     message = EmailMessage()
     message["From"] = os.environ.get("SMTP_FROM") or os.environ.get("SMTP_USER")
     message["To"] = to_address
@@ -909,7 +925,7 @@ def send_email(to_address: str, subject: str, body: str) -> bool:
                 smtp.login(user, password)
             smtp.send_message(message)
     except (OSError, smtplib.SMTPException) as exc:
-        print(f"[intake] email not sent: {exc}")
+        print(f"[intake] email not sent ({type(exc).__name__}); check SMTP settings and hosting port restrictions")
         return False
     return True
 
@@ -936,13 +952,14 @@ def poll_email_once() -> int:
         if status != "OK":
             return 0
         for msg_id in data[0].split():
-            key = msg_id.decode()
-            if key in seen:
-                continue
-            status, fetched = client.fetch(msg_id, "(RFC822)")
+            status, fetched = client.fetch(msg_id, "(BODY.PEEK[])")
             if status != "OK" or not fetched or not fetched[0]:
                 continue
             raw = fetched[0][1]
+            import hashlib
+            key = hashlib.sha256(raw).hexdigest()
+            if key in seen:
+                continue
             msg = email.message_from_bytes(raw)
             sender = parseaddr(msg.get("From") or "")[1]
             subject = msg.get("Subject") or "Freight quote"
@@ -954,29 +971,20 @@ def poll_email_once() -> int:
             if sender.lower() in own:
                 seen.add(key)
                 continue
-            body = _imap_body(msg)
+            from email_intake import ingest_email
             try:
-                outcome = ingest_text(f"{subject}\n{body}", email_from=sender)
-            except LookupError:
-                seen.add(key)
+                result = ingest_email(msg, raw)
+            except (ValueError, PermissionError) as exc:
+                print(f"[intake] email needs review ({type(exc).__name__}); no automatic retry")
+                from api.store import company_businesses
+                business = find_business(load_businesses() + company_businesses(), email_from=sender)
+                if business and business.get("notify_email"):
+                    send_email(business["notify_email"], "Quote email needs attention", "Your quote email could not be fully processed. Check your parse allowance and send readable PDF, text, image, or audio attachments (up to 10 files and 20 MB decoded total). Successfully saved quotes remain in your desk.")
+            except Exception as exc:
+                print(f"[intake] email processing deferred ({type(exc).__name__})")
                 continue
-            record = outcome["record"]
-            held = _reject_absurd(record)
-            decision = _decide_action(body, record, held)
-            letter = _client_letter(body, outcome, decision, held)
-            business = outcome.get("business") or find_business(load_businesses(), email_from=sender)
-            reference = (record.get("commercial") or {}).get("quote_reference_id") or "quote"
-            if business and business.get("notify_email"):
-                send_email(business["notify_email"], f"Quote {reference}".strip(), letter)
-            if os.environ.get("TELEGRAM_BOT_TOKEN") and business:
-                for chat_id in business.get("telegram_chat_ids") or []:
-                    send_telegram(str(chat_id), "A quote arrived by email. I replied by email.")
-            if decision == "ask":
-                seen.add(key)
-                handled += 1
-                continue
-            _store_record(record, f"mail-{key}")
             seen.add(key)
+            client.store(msg_id, "+FLAGS", "\\Seen")
             handled += 1
     finally:
         try:
@@ -1098,6 +1106,8 @@ def main() -> None:
         from telegram_jobs import schedule_pending
         try:
             schedule_pending()
+            from whatsapp_intake import schedule_pending as schedule_whatsapp
+            schedule_whatsapp()
         except Exception as exc:
             print(f"[intake] job recovery deferred: {type(exc).__name__}")
         retry_delay = 0

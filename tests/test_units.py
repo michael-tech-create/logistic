@@ -82,16 +82,14 @@ class CustomsTests(unittest.TestCase):
 
 
 class DutyTests(unittest.TestCase):
-    def test_solar_estimate(self):
+    def test_commodity_name_does_not_invent_a_tariff_or_goods_value(self):
         duty = estimate_duty("solar inverters", {"fx": {"cbn": {"NGN": 2_000_000}}, "commercial": {"currency": "NGN", "total_amount": 2_000_000}})
-        self.assertEqual(duty["hs_code"], "8504.40.00")
-        self.assertEqual(duty["import_duty_ngn"], 100_000)
-        self.assertEqual(duty["etls_ngn"], 10_000)
-        self.assertEqual(duty["ciss_ngn"], 20_000)
-        self.assertGreater(duty["vat_ngn"], 0)
+        self.assertEqual(duty["status"], "needs_inputs")
+        self.assertIsNone(duty["hs_code"])
+        self.assertNotIn("total_ngn", duty)
 
     def test_no_commodity(self):
-        self.assertIsNone(estimate_duty("general cargo", {"commercial": {"currency": "NGN", "total_amount": 10}}))
+        self.assertEqual(estimate_duty("general cargo", {"commercial": {"currency": "NGN", "total_amount": 10}})["status"], "needs_inputs")
 
 
 class MarketTests(unittest.TestCase):

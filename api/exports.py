@@ -11,6 +11,46 @@ from pypdf import PdfReader
 from fpdf import FPDF
 
 
+def assessment_rows(record):
+    """Separate estimates from freight charges to avoid counting costs twice."""
+    result = []
+    customs = record.get("customs_assessment")
+    if customs:
+        value, source = customs["inputs"], customs["tariff"]["source"]
+        result.extend([
+            ("Customs estimate", f"HS {customs['hs_code']} | {customs['label']}"),
+            ("Valuation reference", value["valuation_reference"]),
+            ("Valuation", f"{value['currency']}: goods {value['goods_value']}, freight {value['freight']}, insurance {value['insurance']}, additions {value['adjustments']}"),
+            ("Assessment FX", f"NGN {value['ngn_per_unit']} per {value['currency']} on {value['rate_date']} | {value['rate_source']}"),
+            ("CIF", f"NGN {customs['cif_ngn']:,.2f}"),
+        ])
+        for line in customs["lines"]:
+            result.append((line["label"], f"{line['rate_percent']}% of {' + '.join(line['bases'])} (NGN {line['base_ngn']:,.2f}) = NGN {line['amount_ngn']:,.2f}"))
+        result.extend([
+            ("Customs estimate total", f"NGN {customs['total_ngn']:,.2f}"),
+            ("Tariff source", f"{source['title']} | {source['url']} | {source['effective_from']} to {source['effective_to']}"),
+            ("Assessment basis", customs["basis"]),
+        ])
+    for storage in record.get("storage_assessments", []):
+        value, currency = storage["inputs"], storage["currency"]
+        source = value["source"]
+        result.extend([
+            ("Shipment charges", f"{storage['container']} | {storage['charge_type'].replace('_', ' ')}"),
+            ("Free time", f"Last free date {value['last_free_date']} (inclusive); calculated through {value['as_of_date']}"),
+            ("Day basis", f"{value['day_basis']}; excluded holidays: {', '.join(value['holidays']) or 'none'}"),
+        ])
+        for line in storage["lines"]:
+            result.append(("Rate tier", f"{line['days']} days x {currency} {line['daily_rate']:,.2f} x {line['quantity']} = {currency} {line['amount']:,.2f}"))
+        result.extend([
+            ("Shipment charge estimate", f"{currency} {storage['total']:,.2f}"),
+            ("Carrier / terminal source", f"{source['title']} | {source['url']} | {source['effective_from']} to {source['effective_to']}"),
+            ("Shipment basis", storage["basis"]),
+        ])
+    if result:
+        result.append(("Totals", "These estimates are shown separately from the freight quote. Reconcile existing duty and storage lines before combining totals."))
+    return result
+
+
 def new_pdf() -> FPDF:
     """Bundle the font so naira signs and common Unicode work in Docker too."""
     pdf = FPDF()
@@ -35,7 +75,7 @@ def build_xlsx(records: list[dict], business_name: str) -> bytes:
     headers = [
         "Business", "Lane", "Vendor", "Reference", "Quote date", "Valid until",
         "Origin", "Origin code", "Destination", "Destination code", "Mode",
-        "Incoterms", "Currency", "Description", "Category", "Amount", "Quote total", "Flags",
+        "Incoterms", "Charge currency", "Description", "Category", "Amount", "Quote total", "Flags", "Quote total currency",
     ]
     sheet.append(headers)
     for cell in sheet[1]:
@@ -60,13 +100,30 @@ def build_xlsx(records: list[dict], business_name: str) -> bytes:
                 (movement.get("destination") or {}).get("port_code"),
                 movement.get("mode"),
                 commercial.get("incoterms"),
-                commercial.get("currency"),
+                item.get("currency") or commercial.get("currency"),
                 item.get("description"),
                 item.get("category"),
                 item.get("amount"),
                 commercial.get("total_amount"),
                 flags,
+                commercial.get("currency"),
             ])
+    assessments = [(record, assessment_rows(record)) for record in records]
+    if any(rows for _, rows in assessments):
+        detail = book.create_sheet("Cost calculations")
+        detail.append(["Quote", "Item", "Calculation / source"])
+        for record, rows in assessments:
+            for label, value in rows:
+                detail.append([record.get("record_id") or record["commercial"].get("quote_reference_id"), label, value])
+        detail.column_dimensions["A"].width = 28
+        detail.column_dimensions["B"].width = 28
+        detail.column_dimensions["C"].width = 100
+    for worksheet in book:
+        worksheet.freeze_panes = "A2"
+        for row in worksheet:
+            for cell in row:
+                if isinstance(cell.value, str) and cell.value.lstrip().startswith(("=", "+", "-", "@")):
+                    cell.value = "'" + cell.value
     buffer = BytesIO()
     book.save(buffer)
     return buffer.getvalue()
@@ -101,6 +158,8 @@ def build_pdf(records: list[dict], business_name: str) -> bytes:
             f"Incoterms: {commercial.get('incoterms') or '-'}    Payment: {commercial.get('payment_terms') or '-'}",
             f"Total: {commercial.get('currency')} {commercial.get('total_amount')}",
         ]
+        if record.get("currency_totals"):
+            rows.append("Separate currency subtotals: " + "; ".join(f"{code} {amount:,.2f}" for code, amount in record["currency_totals"].items()))
         for row in rows:
             pdf.set_x(12)
             pdf.multi_cell(186, 7, row)
@@ -111,7 +170,10 @@ def build_pdf(records: list[dict], business_name: str) -> bytes:
         pdf.set_font("Desk", "", 10)
         for item in record.get("line_items") or []:
             pdf.set_x(12)
-            pdf.multi_cell(186, 6, f"{item.get('description')}  [{item.get('category')}]  {commercial.get('currency')} {item.get('amount')}")
+            pdf.multi_cell(186, 6, f"{item.get('description')}  [{item.get('category')}]  {item.get('currency') or commercial.get('currency')} {item.get('amount')}")
+        for label, value in assessment_rows(record):
+            pdf.set_x(12)
+            pdf.multi_cell(186, 6, f"{label}: {value}")
         pdf.ln(4)
         pdf.set_x(12)
         pdf.set_font("Desk", "I", 8)

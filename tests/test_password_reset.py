@@ -22,7 +22,7 @@ class PasswordResetTests(unittest.TestCase):
         folder = tempfile.TemporaryDirectory(prefix="password-reset-")
         self.addCleanup(folder.cleanup)
         for patcher in (
-            patch.dict(os.environ, {"SUPABASE_URL": "", "SUPABASE_SERVICE_ROLE_KEY": "", "RENDER": "", "SMTP_HOST": "smtp.invalid", "SMTP_FROM": "desk@example.test", "PASSWORD_RESET_URL": "https://desk.example.test/reset-password"}),
+            patch.dict(os.environ, {"SUPABASE_URL": "", "SUPABASE_SERVICE_ROLE_KEY": "", "RENDER": "", "RESEND_API_KEY": "", "RESEND_FROM": "", "SMTP_PORT": "587", "SMTP_HOST": "smtp.invalid", "SMTP_FROM": "desk@example.test", "PASSWORD_RESET_URL": "https://desk.example.test/reset-password"}),
             patch.object(store, "DB_PATH", Path(folder.name) / "accounts.sqlite"),
         ):
             patcher.start(); self.addCleanup(patcher.stop)

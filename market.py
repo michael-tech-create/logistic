@@ -97,6 +97,7 @@ def fetch_market_rates() -> dict:
         "usd_ngn": round(usd_ngn, 4),
         "usd_cny": round(cny_per_usd, 4),
         "cny_ngn": round(usd_ngn / cny_per_usd, 4),
+        "rates": rates,
     }
     _MARKET_CACHE["at"] = now
     _MARKET_CACHE["data"] = result
@@ -126,21 +127,22 @@ def quote_views(amount: float, currency: str, settings: dict, market: dict | Non
     if _rate_out_of_band(parallel):
         parallel = None
 
-    def to_usd(value: float) -> float:
+    def to_usd(value: float) -> float | None:
         if currency == "USD":
             return value
         if currency == "NGN" and cbn:
             return value / cbn
         if currency == "CNY":
             return value / usd_cny
-        return value
+        rate = (market.get("rates") or {}).get(currency)
+        return value / float(rate) if rate and float(rate) > 0 else None
 
     usd = to_usd(amount)
     def pack(ngn_per_usd: float | None) -> dict:
-        ngn = round(amount, 2) if currency == "NGN" else _money(usd, ngn_per_usd)
+        ngn = round(amount, 2) if currency == "NGN" else _money(usd, ngn_per_usd) if usd is not None else None
         return {
-            "USD": round(usd, 2),
-            "CNY": round(usd * usd_cny, 2),
+            "USD": round(usd, 2) if usd is not None else None,
+            "CNY": round(usd * usd_cny, 2) if usd is not None else None,
             "NGN": ngn,
             "usd_ngn": ngn_per_usd,
         }
@@ -367,19 +369,19 @@ def enrich(record: dict, business: dict | None = None) -> dict:
             f"Parallel cash used fallback {parallel_fallback:,.0f}. Save your own rate to replace it."
         )
     views = quote_views(commercial["total_amount"], commercial["currency"], settings, market)
-    freight_note = next((flag for flag in record.get("extraction_flags") or [] if flag.startswith("USD freight kept separate")), "")
-    freight_match = re.search(r"USD ([0-9,]+\.\d{2})", freight_note)
-    if freight_match:
-        usd_freight = float(freight_match.group(1).replace(",", ""))
-        local_ngn = float(commercial["total_amount"] or 0)
+    totals = {}
+    for item in record.get("line_items", []):
+        code = item.get("currency") or commercial["currency"]
+        totals[code] = totals.get(code, 0) + float(item.get("amount") or 0)
+    if len(totals) > 1:
+        record["currency_totals"] = {code: round(amount, 2) for code, amount in totals.items()}
+        parts = [quote_views(amount, code, settings, market) for code, amount in totals.items()]
         for tier in ("cbn", "parallel"):
-            rate = (views.get(tier) or {}).get("usd_ngn")
-            if not rate:
-                continue
-            views[tier]["USD"] = usd_freight
-            views[tier]["NGN"] = round(local_ngn + usd_freight * rate, 2)
-            views[tier]["CNY"] = round(usd_freight * ((market or {}).get("usd_cny") or 7.2), 2)
-        views["mixed"] = {"usd_freight": usd_freight, "local_ngn": local_ngn}
+            for code in ("USD", "NGN", "CNY"):
+                amounts = [part[tier][code] for part in parts]
+                views[tier][code] = round(sum(amounts), 2) if all(value is not None for value in amounts) else None
+        if set(totals) == {"USD", "NGN"}:
+            views["mixed"] = {"usd_freight": totals["USD"], "local_ngn": totals["NGN"]}
     views = validate_displayed_fx(views, market, commercial.get("currency") or "")
     duty = commercial.get("customs_and_tax") or 0
     financing = financing_offer(duty, commercial["currency"], views, settings)

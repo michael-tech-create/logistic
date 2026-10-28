@@ -217,12 +217,26 @@ def login(email: str, password: str) -> dict:
     user = conn.execute("SELECT * FROM users WHERE email = ?", (email.lower().strip(),)).fetchone()
     if user is None or not _check_password(password, user["password_hash"]):
         raise ValueError("Email or password is wrong.")
+    return _issue_session(dict(user))
+
+
+def _issue_session(user: dict) -> dict:
     token = secrets.token_urlsafe(32)
+    conn = connect()
     conn.execute("INSERT INTO sessions (token, user_id, created_at) VALUES (?, ?, ?)", (token, user["id"], int(time.time())))
     conn.commit()
-    public = public_user(dict(user))
+    public = public_user(user)
     public["token"] = token
     return public
+
+
+def open_session(user: dict) -> dict:
+    """Open a workspace for a user who was just created, without hashing the password again."""
+    _require_durable()
+    if using_cloud():
+        from api.cloud_store import open_session as cloud_open_session
+        return cloud_open_session(user)
+    return _issue_session(user)
 
 
 def issue_password_reset(email: str, token_hash: str, expires_at: int, now: int) -> bool:
