@@ -178,6 +178,38 @@ class OperationsTests(WorkspaceFixture):
 class WhatsAppTests(WorkspaceFixture):
     chat = "2348000000000@c.us"
 
+    def test_missing_schema_reports_setup_and_blocks_linking(self):
+        message = "WhatsApp setup is incomplete. Apply supabase/operations.sql."
+        with patch.object(state, "require_intake_storage", side_effect=state.StorageSetupError(message)), patch.object(wa, "link_code") as create:
+            result = self.client.get("/v1/channels/whatsapp", headers=self.headers)
+            self.assertEqual(result.status_code, 200)
+            self.assertFalse(result.json()["configured"])
+            self.assertTrue(result.json()["setup_required"])
+            self.assertIn("operations.sql", result.json()["detail"])
+            result = self.client.post("/v1/channels/whatsapp/link", headers=self.headers)
+            self.assertEqual(result.status_code, 409)
+            create.assert_not_called()
+
+    def test_missing_provider_settings_and_temporary_outage_are_distinct(self):
+        with patch.dict(os.environ, {"WAAPI_WEBHOOK_SECRET": ""}):
+            result = self.client.get("/v1/channels/whatsapp", headers=self.headers)
+            self.assertFalse(result.json()["configured"])
+            self.assertIn("webhook", result.json()["detail"])
+        with patch.object(state, "require_intake_storage", side_effect=RuntimeError("private database error")):
+            result = self.client.get("/v1/channels/whatsapp", headers=self.headers)
+            self.assertEqual(result.status_code, 503)
+            self.assertIn("WhatsApp connections", result.json()["detail"])
+            self.assertNotIn("private", result.text)
+
+    def test_supabase_missing_table_is_classified_without_exposing_response(self):
+        from urllib.error import HTTPError
+        error = HTTPError("https://fixture.invalid", 404, "missing", {}, BytesIO(b'{"code":"PGRST205","message":"private internals"}'))
+        with patch.object(store, "using_cloud", return_value=True), patch("supabase_sync._request", side_effect=error):
+            with self.assertRaises(state.StorageSetupError) as result:
+                state.require_intake_storage()
+        self.assertIn("operations.sql", str(result.exception))
+        self.assertNotIn("private", str(result.exception))
+
     def event(self, index=1, chat=None):
         chat = chat or self.chat
         return {"event": "message", "instanceId": "123", "data": {"message": {"from": chat, "id": {"_serialized": f"false_{chat}_{index}"}, "type": "chat", "body": QUOTE}}}

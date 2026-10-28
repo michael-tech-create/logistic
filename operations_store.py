@@ -8,7 +8,33 @@ from __future__ import annotations
 import json
 import time
 from urllib.parse import quote
+from urllib.error import HTTPError
 from api import store
+
+
+class StorageSetupError(RuntimeError):
+    pass
+
+
+def require_intake_storage():
+    """Check hosted schema without reading customer records or changing data."""
+    if not store.using_cloud():
+        with connect():
+            return
+    from supabase_sync import _request
+    for table in ("operation_state", "intake_receipts"):
+        try:
+            _request("GET", table + "?select=*&limit=0", None)
+        except HTTPError as exc:
+            try:
+                code = json.loads(exc.read()).get("code")
+            except (ValueError, AttributeError):
+                code = None
+            if code in {"PGRST205", "42P01", "42703"}:
+                raise StorageSetupError("WhatsApp setup is incomplete. Your administrator needs to apply supabase/operations.sql in Supabase, then refresh this panel.") from exc
+            raise RuntimeError("WhatsApp connections could not be loaded. Please try again shortly.") from exc
+        except Exception as exc:
+            raise RuntimeError("WhatsApp connections could not be loaded. Please try again shortly.") from exc
 
 
 def connect():

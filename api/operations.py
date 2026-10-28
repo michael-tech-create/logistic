@@ -100,9 +100,16 @@ def performance(authorization: str | None = Header(default=None), x_api_key: str
 def whatsapp_status(authorization: str | None = Header(default=None), x_api_key: str | None = Header(default=None)):
     from whatsapp_intake import configured
     _, company = _owner(authorization, x_api_key)
-    links = [{"phone": row["key"].split("@")[0]} for row in state.listing("wa_links", company) if row["payload"].get("active")]
+    try:
+        state.require_intake_storage()
+        links = [{"phone": row["key"].split("@")[0]} for row in state.listing("wa_links", company) if row["payload"].get("active")]
+    except state.StorageSetupError as exc:
+        return {"configured": False, "links": [], "url": None, "setup_required": True, "detail": str(exc)}
+    except Exception as exc:
+        raise HTTPException(503, "WhatsApp connections could not be loaded. Please try again shortly.") from exc
     number = os.environ.get("WHATSAPP_BUSINESS_NUMBER", "")
-    return {"configured": configured(), "links": links, "url": f"https://wa.me/{number}" if re.fullmatch(r"\d{8,16}", number) else None}
+    ready = configured()
+    return {"configured": ready, "links": links, "url": f"https://wa.me/{number}" if re.fullmatch(r"\d{8,16}", number) else None, "setup_required": not ready, "detail": None if ready else "WhatsApp setup is incomplete. Your administrator needs to configure the WhatsApp provider and webhook on the server."}
 
 
 @router.post("/v1/channels/whatsapp/link")
@@ -110,7 +117,13 @@ def new_whatsapp_code(authorization: str | None = Header(default=None), x_api_ke
     from whatsapp_intake import configured, link_code
     _, company = _owner(authorization, x_api_key)
     if not configured(): raise HTTPException(503, "WhatsApp intake is not connected yet. Ask your administrator to finish setup.")
-    return link_code(company)
+    try:
+        state.require_intake_storage()
+        return link_code(company)
+    except state.StorageSetupError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(503, "A WhatsApp connection code could not be created. Please try again shortly.") from exc
 
 
 class Disconnect(BaseModel):
@@ -120,7 +133,13 @@ class Disconnect(BaseModel):
 @router.post("/v1/channels/whatsapp/disconnect")
 def disconnect_whatsapp(body: Disconnect, authorization: str | None = Header(default=None), x_api_key: str | None = Header(default=None)):
     _, company = _owner(authorization, x_api_key)
-    row = state.get("wa_links", body.phone + "@c.us")
+    try:
+        state.require_intake_storage()
+        row = state.get("wa_links", body.phone + "@c.us")
+    except state.StorageSetupError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(503, "WhatsApp connections could not be loaded. Please try again shortly.") from exc
     if not row or row["company_id"] != company: raise HTTPException(404, "Connection not found.")
     if not state.put("wa_links", row["key"], {"active": False}, company, expected=row["revision"]):
         raise HTTPException(409, "The connection changed. Refresh and try again.")

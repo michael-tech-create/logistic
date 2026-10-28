@@ -24,7 +24,7 @@ _lock = threading.Lock()
 
 
 def configured():
-    return bool(os.environ.get("WAAPI_TOKEN") and os.environ.get("WAAPI_INSTANCE_ID") and len(os.environ.get("WAAPI_WEBHOOK_SECRET", "")) >= 32)
+    return bool(os.environ.get("WAAPI_TOKEN") and os.environ.get("WAAPI_INSTANCE_ID", "").isdigit() and len(os.environ.get("WAAPI_WEBHOOK_SECRET", "")) >= 32)
 
 
 def action(name, payload):
