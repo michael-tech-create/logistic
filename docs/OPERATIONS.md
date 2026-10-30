@@ -4,6 +4,14 @@ The project now supports WhatsApp intake, email attachments, scanned-document/au
 
 ## Deploy and connect
 
+### Who completes WhatsApp setup?
+
+The business owner can complete setup if they have access to the API hosting account, the project's Supabase account, and waapi.app. No application code changes are needed. If someone else manages those accounts, that developer or server administrator completes the one-time server steps below. Everyday users only create a connection code and send it in WhatsApp.
+
+In **Connections → WhatsApp intake**, the **One-time setup guide** shows which server settings are available and provides **Copy setup instructions** for a handoff. Save credentials in the Python API service's environment settings, then restart/redeploy the service and click **Check setup again**. The dashboard does not save or display provider credentials. Its checks confirm setting presence/format and database access, not provider authentication or webhook delivery. Send the link command, wait for the confirmation reply, and submit a sample quote to test the complete flow.
+
+### Server steps
+
 1. Apply `supabase/operations.sql` in the project's Supabase SQL editor after the existing `supabase/schema.sql`. It adds private operational state, compare-and-swap claims, and atomic quota receipts. Browser roles have no access. SQLite creates these tables automatically for local development. The new Supabase migration must be applied before enabling these features on Render Free.
 2. Deploy the Python API and dashboard. Run one `python automate.py` intake loop alongside the API as the existing container does. Webhooks schedule WhatsApp work immediately; the loop also recovers pending jobs. A sleeping or restarting host adds latency.
 3. Set `WAAPI_TOKEN`, the numeric `WAAPI_INSTANCE_ID`, a random `WAAPI_WEBHOOK_SECRET` of at least 32 characters, and `WHATSAPP_BUSINESS_NUMBER` (international digits). Use the existing **waapi.app** provider, not similarly named services. Register its **message** event to `https://YOUR_API/whatsapp/webhook/YOUR_SECRET`. The URL is a credential: keep it out of screenshots, source control, and shared proxy logs. Application access logs redact it; configure infrastructure logs separately.

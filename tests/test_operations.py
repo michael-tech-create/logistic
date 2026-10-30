@@ -178,6 +178,21 @@ class OperationsTests(WorkspaceFixture):
 class WhatsAppTests(WorkspaceFixture):
     chat = "2348000000000@c.us"
 
+    def test_setup_checks_report_missing_fields_without_disclosing_credentials(self):
+        with patch.dict(os.environ, {"WAAPI_TOKEN": "private-provider-token", "WAAPI_INSTANCE_ID": "123", "WAAPI_WEBHOOK_SECRET": "private-secret-" * 4, "WHATSAPP_BUSINESS_NUMBER": "2348000000000"}):
+            result = self.client.get("/v1/channels/whatsapp", headers=self.headers)
+            self.assertEqual(result.status_code, 200)
+            self.assertTrue(all(result.json()["checks"].values()))
+            self.assertNotIn("private-provider-token", result.text)
+            self.assertNotIn("private-secret", result.text)
+            with patch.dict(os.environ, {"WAAPI_INSTANCE_ID": "invalid", "WAAPI_WEBHOOK_SECRET": "short", "WHATSAPP_BUSINESS_NUMBER": "+234 800"}):
+                body = self.client.get("/v1/channels/whatsapp", headers=self.headers).json()
+                self.assertFalse(body["configured"])
+                self.assertFalse(body["checks"]["instance_id"])
+                self.assertFalse(body["checks"]["webhook_secret"])
+                self.assertFalse(body["checks"]["business_number"])
+                self.assertIsNone(body["url"])
+
     def test_missing_schema_reports_setup_and_blocks_linking(self):
         message = "WhatsApp setup is incomplete. Apply supabase/operations.sql."
         with patch.object(state, "require_intake_storage", side_effect=state.StorageSetupError(message)), patch.object(wa, "link_code") as create:
@@ -185,6 +200,7 @@ class WhatsAppTests(WorkspaceFixture):
             self.assertEqual(result.status_code, 200)
             self.assertFalse(result.json()["configured"])
             self.assertTrue(result.json()["setup_required"])
+            self.assertFalse(result.json()["checks"]["storage"])
             self.assertIn("operations.sql", result.json()["detail"])
             result = self.client.post("/v1/channels/whatsapp/link", headers=self.headers)
             self.assertEqual(result.status_code, 409)

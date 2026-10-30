@@ -100,16 +100,25 @@ def performance(authorization: str | None = Header(default=None), x_api_key: str
 def whatsapp_status(authorization: str | None = Header(default=None), x_api_key: str | None = Header(default=None)):
     from whatsapp_intake import configured
     _, company = _owner(authorization, x_api_key)
+    number = os.environ.get("WHATSAPP_BUSINESS_NUMBER", "")
+    # Report presence/format only; provider credentials never leave the server.
+    checks = {
+        "storage": False,
+        "provider_token": bool(os.environ.get("WAAPI_TOKEN")),
+        "instance_id": os.environ.get("WAAPI_INSTANCE_ID", "").isdigit(),
+        "webhook_secret": len(os.environ.get("WAAPI_WEBHOOK_SECRET", "")) >= 32,
+        "business_number": bool(re.fullmatch(r"\d{8,16}", number)),
+    }
     try:
         state.require_intake_storage()
+        checks["storage"] = True
         links = [{"phone": row["key"].split("@")[0]} for row in state.listing("wa_links", company) if row["payload"].get("active")]
     except state.StorageSetupError as exc:
-        return {"configured": False, "links": [], "url": None, "setup_required": True, "detail": str(exc)}
+        return {"configured": False, "links": [], "url": None, "setup_required": True, "detail": str(exc), "checks": checks}
     except Exception as exc:
         raise HTTPException(503, "WhatsApp connections could not be loaded. Please try again shortly.") from exc
-    number = os.environ.get("WHATSAPP_BUSINESS_NUMBER", "")
     ready = configured()
-    return {"configured": ready, "links": links, "url": f"https://wa.me/{number}" if re.fullmatch(r"\d{8,16}", number) else None, "setup_required": not ready, "detail": None if ready else "WhatsApp setup is incomplete. Your administrator needs to configure the WhatsApp provider and webhook on the server."}
+    return {"configured": ready, "links": links, "url": f"https://wa.me/{number}" if checks["business_number"] else None, "setup_required": not ready, "detail": None if ready else "Finish the one-time provider and webhook setup below, then connect your number.", "checks": checks}
 
 
 @router.post("/v1/channels/whatsapp/link")
