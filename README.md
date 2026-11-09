@@ -1,73 +1,117 @@
-# Global Customs Quote Desk
+# GlobalTrade.ai
+
+**AI-assisted freight quoting and customs operations for clearing teams.**
 
 **Creator: Michael Unogwu**
 
-Global Customs Quote Desk is an AI-assisted logistics operations platform that converts messy freight quotes from Telegram, email, PDFs, images, and voice notes into normalized customs pricing records, with FX handling, duty estimation, risk controls, human review, exports, and subscription billing.
+GlobalTrade.ai turns freight quotes from WhatsApp, Telegram, email, PDFs, images, voice notes, and pasted text into structured records that your team can review, price, and share. It brings quote intake, currency planning, sourced customs estimates, shipment charges, client documents, approval workflows, and subscriptions into one workspace.
 
+The platform supports international routes and company home-country settings. Its customs and cash-planning workflows currently focus on Nigeria; the product name does not imply built-in customs rules for every country.
 
-diagram:
-Then immediately show:
+```text
+WhatsApp · Telegram · Email · Uploads · Pasted text · API
+                            ↓
+                Document reading and extraction
+                     Gemini + rules parser
+                            ↓
+                  Structured freight quote
+                            ↓
+          FX planning · Customs · Shipment charges
+                            ↓
+                    Team review and approval
+                            ↓
+        Client PDF / Excel · Saved records · Chat replies
+```
 
-Telegram / Email / PDF / Voice
-              ↓
-       Quote Extraction
-       Gemini + Rules
-              ↓
-     Normalized Quote
-              ↓
- ┌────────────┼────────────┐
- FX          Duty        Risk
- │            │            │
- └────────────┼────────────┘
-              ↓
-        Human Review
-              ↓
- Dashboard / Telegram / Email
- PDF / Excel / Client Record
- 
-## The problem it solves
+## Features
 
-A clearing agent receives quotes as messy text, screenshots, voice notes, and PDFs. The numbers sit in different currencies. Ocean freight is often in dollars while local charges are in naira. Turning that into a client-ready figure, then into a file the office can keep, takes the same manual pass on every job.
+### Quote intake and AI extraction
 
-This project does that pass once:
+- **WhatsApp:** receive quote text, PDFs, images, and voice notes through waapi.app. Link a personal number to its workspace with a single-use command, reply with missing details, review the extracted quote, and request PDF or Excel files in chat.
+- **Self-service WhatsApp setup:** enter the API token, instance ID, and business number in the dashboard. **Save and connect** stores workspace settings, generates the security secret, and registers the message webhook automatically. Failed setup can be retried; the provider token is hidden after saving.
+- **Telegram:** link a company, submit text or media, complete missing details in chat, check a quote, download files, compare quotes, and request payment or clearance review.
+- **Email:** process mail from approved company senders, deduplicate intake, and create a separate quote for each supported attachment. The body is used when there are no attachments. Outgoing notifications require a configured mail provider.
+- **Dashboard uploads:** paste quote text or upload PDF, TXT, image, and audio files in batches. Uploads allow 10 MB per file. The shared messaging/email reader allows 20 MB; email is limited to ten attachments and 20 MB of decoded content.
+- **Document reading:** extract readable PDF text, read scanned documents and images, and transcribe voice notes when Gemini is configured. Supported audio includes MP3, M4A, WAV, OGG, Opus, and AAC.
+- **Structured extraction:** identify carrier/vendor, quote references, dates, origin, destination, currencies, priced charge lines, commodity details, and supplied HS codes. Preserve extraction uncertainty and ask for missing information.
+- **Rules fallback:** parse supported text formats with deterministic rules when AI extraction is unavailable. Scanned documents, images, and audio still require the configured media reader.
 
-- It reads the quote with a rules parser and, when a Gemini key has quota, with Gemini.
-- It keeps dollar freight separate from naira charges instead of treating the whole total as dollars.
-- It reads `Origin:` and `Destination:` lines, including city names such as Lagos and Houston, and names the carrier on the quote rather than the desk that received it.
-- A quote that is already in naira stays in naira. It is not run through a second exchange rate.
-- It shows an official naira figure from a live mid-market rate, or from a rate you save, plus a parallel cash rate when you set one. Fallback rates start at 1,550 official and 1,650 parallel, and the desk can change them without a code edit.
-- It estimates Nigerian customs charges when it recognises a commodity or an HS code already written on the quote.
-- It holds a quote that looks wrong, such as a dollar total above 100,000 with no naira split, or an all-in naira figure above 500 million.
-- It remembers a short follow-up in the same Telegram chat so the client can add a missing port or price.
-- It emails the client letter and keeps a shorter summary in Telegram, with buttons for a PDF, a spreadsheet, a WhatsApp link, and a comparison of up to three quotes.
+### Quote workspace and client documents
 
-## What you get
+- **Company workspace:** sign up, sign in, reset a forgotten password, and access records scoped to the authenticated company.
+- **Quote inbox:** search and filter loaded records, inspect source text and extraction notes, view processing status, and delete owned quotes.
+- **Review and correction:** inspect routes, charges, currencies, and missing inputs; revise the source to create a corrected quote; save a checked status before exporting from the desk.
+- **Client packs:** process multiple uploaded files, review each quote, and export a checked pack. The latest pack is restored in the same browser/account.
+- **PDF and Excel exports:** download individual quotes and batches. Saved customs and shipment calculations include their inputs, source references, dates, and calculation details.
+- **Quote comparison:** compare up to three quotes on the same route through Telegram or the API.
+- **Planning views:** retain original currencies, show currency estimates and charge splits, and avoid adding USD and NGN amounts into an unlabeled total.
+- **Risk flags:** surface suspicious totals or inconsistent currency estimates for review, with an API workflow for resolving flags.
 
-| Piece | What it does |
-| --- | --- |
-| Telegram bot `@freight_quote_bot` | Links a company, accepts text, voice notes, photos, and PDF/TXT files, then guides checking and export. Email copies follow the quote check. |
-| Email intake | Reads unread mail for the addresses listed on the business, and ignores mail the desk sent itself. |
-| Quote API | FastAPI on port 8000. Parse, batch upload, Excel, PDF, company tools, plans, and human reviews. |
-| Clearing desk | Next.js app on port 3000. Charts, inbox, delete, port-risk level, fallback rates, and the review queue. |
-| Review screen | Vite app in `web/` for checking one normalized quote. |
-| Supabase sync | Upserts a priced quote into `quotes`, `line_items`, and `quote_splits` after you run `supabase/schema.sql`. |
-| Terminal watcher | A Go program that reads the public PTML Tin Can vessel schedule and posts it to the API. |
+### Customs, currencies, and shipment costs
 
-New accounts get 5 trial parses. Paystack then offers two monthly plans: ₦15,000 for 200 parses (`quote-200`) and ₦50,000 for 1,000 parses (`quote-1000`). `POST /v1/quotes/parse` and `POST /v1/quotes/batch` reject the call with 402 when the account is over its cap. Telegram also uses the linked account's allowance for new priced quotes; commands, failed file reads, and replies completing a charged draft do not use another parse.
+- **Trade-lane classification:** classify import, export, domestic, cross-trade, or unknown routes using the company's home country. Incoterms come from the supplied document.
+- **Currency planning:** keep foreign-currency freight separate from local charges, provide NGN/USD/CNY views where rates are available, and support saved parallel rates and fallback settings. Quotes already in naira are not converted into naira a second time.
+- **Sourced tariff profiles:** save reviewed 8- or 10-digit HS profiles with source URLs, effective dates, charge percentages, and calculation bases.
+- **Customs valuation:** calculate from confirmed goods value, freight, insurance, adjustments, and a dated assessment exchange rate. Charges can use CIF, FOB, or earlier charges as their base. A freight total is not assumed to be the goods value.
+- **Shipment charges:** calculate demurrage, detention, or terminal storage from container details, an inclusive last free date, quantities, and tiered daily schedules. Support calendar days or weekdays with excluded holidays.
+- **Shipment checks:** recalculate saved schedules on demand and show approaching deadlines, overdue charges, or sources needing review. These checks are separate from the terminal watcher.
+- **Review history:** retain the tariff snapshot used by a saved calculation. Changing a cost calculation clears the checked status so the quote can be reviewed again.
+- **Port-risk planning:** choose normal, elevated, or severe risk settings for planning buffers.
+- **Finance and allocation planning:** record duty-finance requests, escrow entries, and payout plans, with a configurable finance-fee estimate and charge allocation. These records do not themselves move money.
 
-## How a quote moves
+### Approvals, billing, and operations
 
-1. Telegram, email, or `POST /v1/quotes/parse` receives the text or file.
-2. `quote_agent.py` extracts the vendor, dates, currency, and charge lines. Gemini is tried first when keys are configured. The rules parser covers the rest.
-3. `customs.py` assigns a lane: export, import, cross-trade, domestic, or unknown. The home country comes from the business profile. Incoterms are taken from the document only.
-4. `market.py` adds the naira and yuan view, a 2% duty-finance estimate when duty is present, a demurrage buffer from the desk port-risk setting, and a 70/15/12/3 split across the shipping line, trucker, clearing agent, and platform fee.
-5. `duty.py` flags missing customs inputs without assuming rates. The quote dialog calculates customs estimates from confirmed goods valuation, dated FX, and an operator-reviewed tariff profile; `shipment_costs.py` also calculates free-time and tiered shipment charges.
-6. The record is stored under `state/records/` before Telegram shows its buttons. The user checks the extracted details before downloads become available. An email copy is sent after the check when SMTP is configured.
-7. Telegram updates are saved to `state/telegram_jobs.sqlite` before polling acknowledges them, or authenticated webhook intake returns HTTP 200. Workers process files and text in order within each chat, allowing other chats to proceed independently. Drafts and file-backed FX caches expire, and pending storage syncs are retried.
+- **Human approvals:** confirm payment or cargo-clearance requests, approve or reject them in the dashboard, and inspect request history.
+- **Provider submission:** submit an approved request when a payment or customs provider is connected. An approval can be retained until a provider is available. Atomic submission claims prevent concurrent requests from sending the same approval twice.
+- **Delivery uncertainty:** flag uncertain provider responses for verification instead of automatically resending potentially completed payments or messages.
+- **Subscriptions:** Paystack checkout, payment verification, webhook processing, and account parse allowances.
+- **Usage accounting:** enforce parse limits, retain durable quota receipts for supported intake paths, and avoid charging failed media reads or a second parse for completing an already charged chat draft.
+- **Performance measurements:** display recent processing samples, median, 95th percentile, and the count prepared within five seconds. Each quote records what its timing covers.
+- **Durable intake:** deduplicate WhatsApp events and email content, process chat jobs in order, recover eligible pending jobs, and retry transient processing failures.
+- **Storage:** SQLite for local operation and Supabase-backed storage for hosted records and operational state. Existing local job queues and file-backed state still require durable storage.
+- **Terminal integration:** an optional Go watcher reads the public PTML vessel schedule and submits updates; the API also provides terminal scraping/status workflows and review handling for unavailable feeds.
+- **Developer access:** authenticated FastAPI endpoints, account API keys, interactive API documentation, health checks, and a minimal MCP JSON-RPC endpoint exposing `parse_freight_quote`.
+- **Public website:** product overview, workflow examples, pricing, FAQs, signup, and sign-in entry points. A separate Vite quote-review demonstration remains in `web/`.
 
-Company signup creates a code such as `co-…`. A Telegram chat links with `/link CODE`.
+## Plans and usage
 
-Telegram commands include `/start`, `/help`, `/new`, `/cancel`, `/status`, `/settings`, `/compare`, `/pay`, `/clear`, and `/unlink`. See [docs/TELEGRAM-WORKFLOW.md](docs/TELEGRAM-WORKFLOW.md) for the repaired features, delivery setup, and workflow. Check configuration without sending messages with `python telegram_diagnostics.py`; add `--live` for read-only Telegram credential/webhook checks.
+The prices below are the plans currently configured in the application.
+
+| Plan | Parse allowance | Price |
+| --- | --- | --- |
+| Trial | 5 parses | Free |
+| `quote-200` | 200 parses per 30-day period | ₦15,000 |
+| `quote-1000` | 1,000 parses per 30-day period | ₦50,000 |
+
+New quote parsing consumes the account allowance. Parsing endpoints return HTTP 402 when the cap is reached. Reviewing saved quotes and downloading exports do not consume another parse. Subscription payments purchase parsing capacity; they do not fund freight, customs duties, or payouts.
+
+## Everyday workflow
+
+1. **Create a workspace.** Sign up and set the company details and home country.
+2. **Choose an intake channel.** Upload files, paste text, or connect WhatsApp, Telegram, or email.
+3. **Prepare the quote.** Read the extracted route, charge lines, currency estimates, and source. Supply missing details or correct the source where needed.
+4. **Add supported costs.** Apply a reviewed tariff profile and confirmed valuation, or enter the shipment's actual free-time and charge schedule.
+5. **Check and share.** Save the checked status, then download a client PDF or Excel file. Review every quote in a client pack before exporting it from the dashboard.
+6. **Request approval when needed.** Payment and clearance actions use a separate approval queue and require configured external providers for submission.
+
+The dashboard sections are **Quotes**, **Approvals**, **Connections**, and **Settings**. The homepage is `/`; the workspace is `/desk`; registration opens `/desk?mode=register`.
+
+### Connect WhatsApp without editing server settings
+
+1. In **Connections → Connect WhatsApp**, enter the waapi.app API token, numeric instance ID, and business WhatsApp number, including its country code.
+2. Click **Save and connect**. The app saves the details and registers the webhook automatically. The token needs update permission; this replaces any existing webhook on that instance.
+3. Create a connection code and send the displayed `/link` command from your own WhatsApp to the business number within ten minutes. The command works once.
+4. Wait for the confirmation reply, then send a sample quote and check the inbox.
+
+Your business number must already be linked in WaAPI, and the app must be reachable over public HTTPS. Saved settings and accepted webhook registration do not prove end-to-end delivery. Workspace-owned settings take effect without a restart; legacy environment-based installations remain supported. The hosted database must already have the operational storage migration.
+
+WhatsApp commands include `/help`, `/new`, `/cancel`, `/status`, `/check`, `/pdf`, and `/excel`. Only private phone-number chats are supported; disconnect a personal number before moving it to another workspace. See [the operations guide](docs/OPERATIONS.md) for setup, delivery behavior, and calculation details.
+
+### Telegram and email
+
+Telegram links using the company's `/link CODE`. Commands include `/start`, `/help`, `/new`, `/cancel`, `/status`, `/settings`, `/compare`, `/pay`, `/clear`, and `/unlink`. See [the Telegram workflow](docs/TELEGRAM-WORKFLOW.md). Run `python telegram_diagnostics.py` for local diagnostics; `--live` adds read-only provider checks.
+
+Email uses the configured IMAP mailbox and each company's approved **sender** addresses in `inbound_emails` or the existing business configuration. Outbound notifications use configured Resend or SMTP delivery. See [the operations guide](docs/OPERATIONS.md) and [email/password-reset setup](docs/PASSWORD-RESET.md).
 
 ## Run it locally
 
@@ -109,50 +153,37 @@ The login page includes **Forgot password?** with expiring email reset links. Fo
 
 For Paystack checkout errors such as `401 invalid_Key`, update `PAYSTACK_SECRET_KEY` on the Python API service, then restart it. Use `python paystack_diagnostics.py --live` for a read-only credential check. See [docs/PAYSTACK.md](docs/PAYSTACK.md).
 
-`SUPABASE_URL` must be the project HTTP address, `https://<project-ref>.supabase.co`, with the service-role or secret key in `SUPABASE_SERVICE_ROLE_KEY`. Run `supabase/schema.sql` in the Supabase SQL editor before the first sync. Each saved quote starts at status `pending`.
+`SUPABASE_URL` must be the project HTTP address, `https://<project-ref>.supabase.co`, with the service-role or secret key in `SUPABASE_SERVICE_ROLE_KEY`. Run `supabase/schema.sql` in the Supabase SQL editor before the first sync, then apply `supabase/operations.sql` for WhatsApp settings, intake jobs, quota receipts, tariffs, and shipment calculations. Each saved quote starts at status `pending`.
 
 ## Pay, clearance, and human review
 
 On a checked quote, “pay the trucker” or `/pay` opens a confirmation for a payment review; “clear the cargo” or `/clear` opens a clearance review. Confirmation queues a person and replies with the review number. Only approval on the desk attempts `PAYOUT_URL` or `CUSTOMS_CLEAR_URL`. Human approval is saved as `approved` when no provider is connected; nothing is sent. After connecting the provider, use **Send to provider** or `POST /v1/reviews/{id}/execute`. A provider submission is claimed atomically before the call, preventing concurrent approvals from sending it twice. An unconfirmed provider response becomes `execution_uncertain`; verify with the provider before any further action. Successful submission becomes `executed` (provider accepted, not proof of final settlement or clearance). A process interrupted during submission stays `processing` for manual verification rather than automatic resubmission. The **Approvals** section lists requests and recent decisions. Approve or reject through `POST /v1/reviews/{id}` with a status of `approved` or `rejected`.
 
-## Honest limits
+## Scope and limits
 
 - Official USD/NGN comes from the open ExchangeRate-API mid-market feed unless you save `cbn_usd_ngn`. That feed is not the Central Bank customs assessment rate. If the feed is down, the desk uses the fallback official rate, which starts at 1,550 and can be changed on the desk or with `FX_FALLBACK_OFFICIAL_USD_NGN`. A missing parallel rate uses the fallback that starts at 1,650 (`FX_FALLBACK_PARALLEL_USD_NGN`) only when the quote is not already in naira.
 - Port risk is a desk setting: normal ₦350,000, elevated ₦900,000, severe ₦1,800,000. It is not a live congestion index.
+- Processing measurements exclude queue time, final delivery, exports, and human review; they are not a five-second end-to-end guarantee.
 - Customs estimates require a sourced tariff profile and explicit valuation. They are not an NCS assessment. Shipment charges require the carrier or terminal’s actual dates and rate schedule.
 - Duty finance, escrow, and payout plans on the desk are ledger rows. Paystack charges only the ₦15,000 or ₦50,000 subscription. No lender disburses funds.
 - The bot cannot pay a person or clear cargo until `PAYOUT_URL` and `CUSTOMS_CLEAR_URL` point at a real bank and a real customs system. Requests require human approval; without a provider, that approval is retained and nothing is sent.
 
-## Desk workflow
-
-The public homepage is at `/`, with the user-supplied robot hero, a workflow example, plans, and FAQs. **Start free** opens `/desk?mode=register`; **Sign in** opens `/desk`. Old root links such as `/#approvals` redirect to the matching desk section. Telegram buttons and billing return links open `/desk` directly.
-
-The dashboard in `dashboard/` is organized into **Quotes**, **Approvals**, **Connections**, and **Settings**.
-
-1. Choose **Add a quote** and upload readable PDF/TXT files (up to 10 MB each), or paste the original text. The desk shows how many parses this needs.
-2. Check the selected quote's route, charges, original text, extraction notes, and currency estimates. Use **Correct quote** to revise the source and create a new quote if needed.
-3. Confirm the check and choose **Mark checked and continue**. The check is saved to that quote and survives a refresh.
-4. Export the selected quote as PDF or Excel. An uploaded client pack becomes available for export in the interface after every quote in it is checked. The most recent pack is restored in the same browser/account.
-
-Finance requests, escrow ledger entries, and payout plans operate on the quote currently open. Payment and clearance requests have a separate **Approvals** queue with confirmation before a decision. **Connections** explains Telegram linking and checks the email connection; **Settings** contains company preferences and subscription checkout.
-
-The inbox shows recent quotes; search and filters apply to the loaded records. Monetary totals retain their original currencies rather than adding USD and NGN together. The separate `web/` parser demonstration is unchanged.
-
-Research rationale, sources, implementation scope, and follow-up usability tasks are in [docs/UX-RESEARCH.md](docs/UX-RESEARCH.md). Run dashboard workflow checks with `cd dashboard && npm test`.
-
 ## Layout
 
 ```
-automate.py          Telegram and email loop
+automate.py          Telegram, email, and intake recovery loop
 quote_agent.py       Rules parser and Gemini
 customs.py           Lane, notice text, business match
 market.py            FX, finance estimate, demurrage, split
 shipment_costs.py    Sourced customs and shipment charge calculations
 whatsapp_intake.py   Linked WhatsApp intake and durable delivery jobs
+whatsapp_settings.py Workspace credentials and automatic webhook registration
+media_intake.py      Shared PDF, image, audio, and email reader
+operations_store.py  Durable operational state and quota receipts
 email_intake.py      Separate, deduplicated email attachment quotes
 supabase_sync.py     Remote insert
 api/                 FastAPI, billing, exports
-dashboard/           Clearing desk
+dashboard/           GlobalTrade.ai website and workspace
 web/                 Single-quote review screen
 actions.py           Pay and clear attempts, or a human review
 workers.py           Background voice and PDF work
@@ -162,7 +193,7 @@ supabase/schema.sql  Quotes, line items, splits
 
 ## Deploy
 
-The clearing desk is Next.js in `dashboard/`. The API and the Telegram/email loop are Python in this repo root. They share `state/` (billing SQLite, quote JSON, Telegram offset). Run them as one container so that folder is one disk. Two Render or Railway services each get a private disk, and the desk would not see quotes the worker saved.
+The GlobalTrade.ai dashboard is Next.js in `dashboard/`. The API and the Telegram/email loop are Python in this repo root. They share `state/` (billing SQLite, quote JSON, Telegram offset). Run them as one container so that folder is one disk. Two Render or Railway services each get a private disk, and the desk would not see quotes the worker saved.
 
 ### Desk on Vercel
 
@@ -171,6 +202,7 @@ The clearing desk is Next.js in `dashboard/`. The API and the Telegram/email loo
 3. Set `API_PROXY_URL` to the public API origin, for example `https://quote-desk-api.onrender.com`. No trailing slash.
 4. Set `NEXT_PUBLIC_SITE_URL` to the public website origin for absolute Open Graph image URLs. Leave `NEXT_PUBLIC_API_URL` unset. The desk then calls `/v1/...` on its own host, and `dashboard/next.config.js` proxies that to `API_PROXY_URL`.
 5. Set `PAYSTACK_CALLBACK_URL` on the API to `https://<your-vercel-host>/billing`.
+6. Deploy the dashboard, Python API, and intake worker from the same revision. Confirm the production deployment uses the latest commit; redeploying an old deployment rebuilds its old code. The WhatsApp form requires the updated dashboard, settings API, worker, and `/whatsapp/*` proxy route.
 
 The desk does not read Supabase. `NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_ANON_KEY` are not used.
 
@@ -206,6 +238,26 @@ To run the two processes on different hosts later, both need the same `state/` v
 
 Michael Unogwu built this desk so a clearing business can take a quote from a chat, an inbox, or a file and answer with one priced record the client can read.
 
-## Expanded intake and cost workflow
+## Validation and further documentation
 
-WhatsApp connections, email attachments, scanned/audio uploads, sourced customs calculations, shipment deadline checks, and performance measurements are described in [docs/OPERATIONS.md](docs/OPERATIONS.md). Apply [supabase/operations.sql](supabase/operations.sql) before enabling these on a Supabase deployment. Messaging/media credentials and reviewed tariff data must be supplied; five-second turnaround and business outcome guarantees are not established.
+From the repository root, run the backend tests with provider environment values disabled:
+
+```bash
+PYTHON_DOTENV_DISABLED=1 GEMINI_API_KEYS= GEMINI_API_KEY= SUPABASE_URL= SUPABASE_SERVICE_ROLE_KEY= REDIS_URL= .venv/bin/python -m unittest discover -s tests
+```
+
+Check the dashboard from `dashboard/`:
+
+```bash
+npm test
+npm run build
+```
+
+Tests and builds do not verify live credentials or message delivery. Test each configured channel on the deployed application before relying on it.
+
+- [Operations, WhatsApp, customs, shipment costs, and performance](docs/OPERATIONS.md)
+- [Telegram workflow and diagnostics](docs/TELEGRAM-WORKFLOW.md)
+- [Password reset and outgoing email](docs/PASSWORD-RESET.md)
+- [Paystack setup and troubleshooting](docs/PAYSTACK.md)
+- [Homepage and local development](docs/HOMEPAGE.md)
+- [UX research and implementation scope](docs/UX-RESEARCH.md)
