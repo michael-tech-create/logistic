@@ -17,21 +17,24 @@ from urllib.parse import urlsplit
 from api import store
 import operations_store as state
 from media_intake import MAX_BYTES, read_document
+from whatsapp_settings import current_company, active_settings, settings, saved
 
 logger = logging.getLogger(__name__)
 _running = set()
 _lock = threading.Lock()
 
 
-def configured():
-    return bool(os.environ.get("WAAPI_TOKEN") and os.environ.get("WAAPI_INSTANCE_ID", "").isdigit() and len(os.environ.get("WAAPI_WEBHOOK_SECRET", "")) >= 32)
+def configured(company=None):
+    config = settings(company)
+    return bool(config["token"] and config["instance_id"].isdigit() and len(config["webhook_secret"]) >= 32 and config.get("webhook_ready", True))
 
 
 def action(name, payload):
-    instance = os.environ.get("WAAPI_INSTANCE_ID", "")
-    if not instance.isdigit() or not os.environ.get("WAAPI_TOKEN"):
+    config = settings()
+    instance = config["instance_id"]
+    if not instance.isdigit() or not config["token"]:
         raise RuntimeError("WhatsApp is not configured.")
-    request = urllib.request.Request(f"https://waapi.app/api/v1/instances/{instance}/client/action/{name}", data=json.dumps(payload).encode(), headers={"Authorization": f"Bearer {os.environ['WAAPI_TOKEN']}", "Content-Type": "application/json", "Accept": "application/json"})
+    request = urllib.request.Request(f"https://waapi.app/api/v1/instances/{instance}/client/action/{name}", data=json.dumps(payload).encode(), headers={"Authorization": f"Bearer {config['token']}", "Content-Type": "application/json", "Accept": "application/json"})
     with urllib.request.urlopen(request, timeout=30) as response:
         raw = json.loads(response.read(1024 * 1024))
     inner = raw.get("data") or {}
@@ -52,6 +55,9 @@ def link_chat(chat, token):
     row = state.get("wa_link_tokens", digest)
     if not row or row["payload"].get("used") or row["payload"].get("expires_at", 0) < time.time():
         return "This connection code is invalid or expired. Create a new code in Connections on your desk."
+    provider_company = current_company.get()
+    if (provider_company and row["company_id"] != provider_company) or (not provider_company and saved(row["company_id"])):
+        return "Send this command to your workspace’s business WhatsApp number."
     old = state.get("wa_links", chat)
     if old and old["payload"].get("active") and old["company_id"] != row["company_id"]:
         return "This number already belongs to another workspace. Disconnect it from that workspace's Connections page first."
@@ -62,8 +68,8 @@ def link_chat(chat, token):
     return "Connected to your clearing desk. Send a quote as text, PDF, photo, or voice note. I will prepare the details for your review."
 
 
-def enqueue(payload):
-    if str(payload.get("instanceId")) != os.environ.get("WAAPI_INSTANCE_ID"):
+def enqueue(payload, company=None):
+    if str(payload.get("instanceId")) != settings(company)["instance_id"]:
         raise ValueError("Wrong WhatsApp instance.")
     if payload.get("event") != "message": return None
     message = (payload.get("data") or {}).get("message") or {}
@@ -76,8 +82,8 @@ def enqueue(payload):
     if not isinstance(identifier, str) or not identifier.startswith(f"false_{chat}_") or len(identifier) > 300:
         raise ValueError("Invalid inbound message identifier.")
     # Never persist user-provided media URLs; downloads come from WaAPI by message ID.
-    key = "wa-" + hashlib.sha256(identifier.encode()).hexdigest()[:32]
-    state.put("wa_jobs", key, {"status": "pending", "message_id": identifier, "chat": chat, "attempts": 0, "available_at": 0, "received_at": time.time()}, expected=0)
+    key = "wa-" + hashlib.sha256(((company + ":" if company else "") + identifier).encode()).hexdigest()[:32]
+    state.put("wa_jobs", key, {"status": "pending", "message_id": identifier, "chat": chat, "attempts": 0, "available_at": 0, "received_at": time.time(), "provider_company": company, "provider_instance": str(payload.get("instanceId"))}, company, expected=0)
     return key
 
 
@@ -129,6 +135,9 @@ def process_message(job):
     if not link or not link["payload"].get("active"):
         return {"text": "Welcome to Clearing Desk. Open Connections on your desk, create a WhatsApp connection code, and send the /link command here. " + (_dashboard_url() or "")}
     company_id = link["company_id"]
+    provider_company = current_company.get()
+    if (provider_company and company_id != provider_company) or (not provider_company and saved(company_id)):
+        return {"text": "Please message your workspace’s business WhatsApp number."}
     user = store.user_by_company(company_id)
     if not user: raise ValueError("Your workspace is unavailable. Sign in on the desk.")
     from api.main import _business
@@ -188,6 +197,23 @@ def process_message(job):
 def run_job(key):
     row = state.get("wa_jobs", key)
     if not row: return
+    company = row["payload"].get("provider_company")
+    config = settings(company)
+    if row["payload"].get("status") == "pending" and row["payload"].get("provider_instance", config["instance_id"]) != config["instance_id"]:
+        state.put("wa_jobs", key, {**row["payload"], "status": "failed", "reason": "provider_instance_changed"}, expected=row["revision"])
+        return
+    context = current_company.set(company)
+    snapshot = active_settings.set(config)
+    try:
+        return _run_job(key)
+    finally:
+        active_settings.reset(snapshot)
+        current_company.reset(context)
+
+
+def _run_job(key):
+    row = state.get("wa_jobs", key)
+    if not row: return
     job = row["payload"]
     now = time.time()
     if job.get("status") != "pending" or job.get("available_at", 0) > now: return
@@ -214,7 +240,7 @@ def run_job(key):
         # whether a provider accepted it, so delivery is not retried automatically.
         sending = state.put("wa_jobs", key, {**job, "status": "sending", "reply": reply})
         try:
-            pinned = os.environ.get("WAAPI_CHAT_ID", "").strip()
+            pinned = "" if current_company.get() else os.environ.get("WAAPI_CHAT_ID", "").strip()
             if pinned and (pinned if "@" in pinned else pinned + "@c.us") != chat:
                 raise RuntimeError("Trial recipient restriction: refusing to redirect a private quote.")
             if reply.get("mediaBase64"):
@@ -231,7 +257,7 @@ def run_job(key):
 
 
 def schedule_pending():
-    if not configured(): return
+    if not configured() and not state.listing("wa_settings", limit=1): return
     from workers import submit
     for row in state.listing("wa_jobs", status="sending"):
         if row["updated_at"] < time.time() - 900:

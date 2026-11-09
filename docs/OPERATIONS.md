@@ -4,11 +4,13 @@ The project now supports WhatsApp intake, email attachments, scanned-document/au
 
 ## Deploy and connect
 
-### Who completes WhatsApp setup?
+### WhatsApp setup in the app
 
-The business owner can complete setup if they have access to the API hosting account, the project's Supabase account, and waapi.app. No application code changes are needed. If someone else manages those accounts, that developer or server administrator completes the one-time server steps below. Everyday users only create a connection code and send it in WhatsApp.
+Open **Connections → Connect WhatsApp**. Enter the WaAPI API token (with update permission), numeric instance ID, and linked business number, then select **Save and connect**. The API saves private workspace settings, generates a secret, and registers the message webhook automatically using [WaAPI's update-instance endpoint](https://waapi.readme.io/reference/update-instance). This replaces the instance's existing webhook. The app must be accessed through public HTTPS; the dashboard proxies `/whatsapp/*` callbacks to the API.
 
-In **Connections → WhatsApp intake**, the **One-time setup guide** shows which server settings are available and provides **Copy setup instructions** for a handoff. Save credentials in the Python API service's environment settings, then restart/redeploy the service and click **Check setup again**. The dashboard does not save or display provider credentials. Its checks confirm setting presence/format and database access, not provider authentication or webhook delivery. Send the link command, wait for the confirmation reply, and submit a sample quote to test the complete flow.
+Provider failures leave a retryable setup state. An empty token on retry keeps the saved token. Only confirmed webhook registration unlocks connection codes for saved settings. Workers use the workspace's credentials; other workspaces cannot read them. The provider token and secret are never returned by the status endpoint. Verify delivery by linking your own number and sending a sample quote. Existing server-based settings remain supported.
+
+Deploy the dashboard, API, and worker from the same revision. The release must include `dashboard/app/WhatsAppConnection.js`, `dashboard/next.config.js`, `api/operations.py`, `whatsapp_intake.py`, and `whatsapp_settings.py`. Deploying only the settings helper leaves the old instruction panel active. No additional database migration beyond the existing operational storage migration is needed.
 
 ### Server steps
 

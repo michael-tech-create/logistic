@@ -178,6 +178,82 @@ class OperationsTests(WorkspaceFixture):
 class WhatsAppTests(WorkspaceFixture):
     chat = "2348000000000@c.us"
 
+    def test_saved_setup_registers_webhook_and_keeps_credentials_private(self):
+        from whatsapp_settings import saved, settings, current_company
+        self.client = TestClient(api.app, base_url="https://desk.example.test")
+        details = {"token": "private-workspace-token", "instance_id": "456", "business_number": "2348000000001"}
+        self.assertEqual(self.client.put("/v1/channels/whatsapp/settings", json=details).status_code, 401)
+        with patch("whatsapp_settings.register_webhook") as register:
+            response = self.client.put("/v1/channels/whatsapp/settings", headers=self.headers, json=details)
+        self.assertEqual(response.status_code, 200, response.text)
+        url = register.call_args.args[1]
+        self.assertIn("/whatsapp/webhook/" + self.company + "/", url)
+        self.assertTrue(url.startswith("https://"))
+        with patch.dict(os.environ, {"WAAPI_TOKEN": "", "WAAPI_INSTANCE_ID": "", "WAAPI_WEBHOOK_SECRET": ""}):
+            response = self.client.get("/v1/channels/whatsapp", headers=self.headers)
+            self.assertTrue(response.json()["configured"])
+            self.assertTrue(response.json()["webhook_ready"])
+            self.assertNotIn(details["token"], response.text)
+            self.assertNotIn(saved(self.company)["payload"]["webhook_secret"], response.text)
+            self.assertEqual(response.headers["cache-control"], "no-store")
+            other = store.register("other-setup@example.test", "fixture-password", "Other")
+            other_status = self.client.get("/v1/channels/whatsapp", headers={"X-API-Key": other["api_key"]}).json()
+            self.assertFalse(other_status["configured"])
+            self.assertFalse(other_status["token_saved"])
+            self.assertEqual(other_status["instance_id"], "")
+            event = {**self.event(), "instanceId": "456"}
+            with patch.object(wa, "schedule_pending"):
+                self.assertEqual(self.client.post(url + "wrong", json=event).status_code, 401)
+                self.assertEqual(self.client.post(url, json=self.event()).status_code, 400)
+                self.assertEqual(self.client.post(url, json=event).status_code, 200)
+            command = wa.link_code(self.company)["command"]
+            calls = []
+            def provider(name, body):
+                calls.append(settings()["token"])
+                return {"from": self.chat, "body": command} if name == "get-message-by-id" else {}
+            job = state.listing("wa_jobs", self.company)[0]
+            with patch.object(wa, "action", side_effect=provider):
+                wa.run_job(job["key"])
+            self.assertEqual(calls, [details["token"], details["token"]])
+            self.assertIsNone(current_company.get())
+            context = current_company.set(self.company)
+            try:
+                code = wa.link_code(other["company_code"])["command"].split()[1]
+                self.assertIn("workspace", wa.link_chat("2348111111111@c.us", code))
+                self.assertIsNone(state.get("wa_links", "2348111111111@c.us"))
+            finally:
+                current_company.reset(context)
+
+    def test_failed_automatic_setup_is_retryable_and_preserves_token(self):
+        self.client = TestClient(api.app, base_url="https://desk.example.test")
+        details = {"token": "test-private-token", "instance_id": "456", "business_number": "2348000000001"}
+        with patch("whatsapp_settings.register_webhook", side_effect=ValueError("WaAPI could not complete setup. Please retry.")):
+            result = self.client.put("/v1/channels/whatsapp/settings", headers=self.headers, json=details)
+        self.assertEqual(result.status_code, 502)
+        status = self.client.get("/v1/channels/whatsapp", headers=self.headers).json()
+        self.assertTrue(status["token_saved"])
+        self.assertFalse(status["configured"])
+        with patch("whatsapp_settings.register_webhook") as register:
+            result = self.client.put("/v1/channels/whatsapp/settings", headers=self.headers, json={**details, "token": None})
+        self.assertEqual(result.status_code, 200)
+        self.assertEqual(register.call_args.args[0]["token"], details["token"])
+
+    def test_provider_registration_sends_expected_request_and_sanitizes_errors(self):
+        from whatsapp_settings import register_webhook
+        from unittest.mock import MagicMock
+        from urllib.error import HTTPError
+        opener = MagicMock()
+        opener.open.return_value.__enter__.return_value.read.return_value = b'{"status":"success"}'
+        with patch("urllib.request.build_opener", return_value=opener):
+            register_webhook({"token": "secret", "instance_id": "456"}, "https://desk.example.test/webhook/secret")
+            request = opener.open.call_args.args[0]
+            self.assertEqual(request.method, "PUT")
+            self.assertEqual(request.full_url, "https://waapi.app/api/v1/instances/456")
+            self.assertEqual(json.loads(request.data)["webhook"]["events"], ["message"])
+            opener.open.side_effect = HTTPError(request.full_url, 401, "private error", {}, None)
+            with self.assertRaisesRegex(ValueError, "WaAPI rejected"):
+                register_webhook({"token": "secret", "instance_id": "456"}, "https://desk.example.test/webhook/secret")
+
     def test_setup_checks_report_missing_fields_without_disclosing_credentials(self):
         with patch.dict(os.environ, {"WAAPI_TOKEN": "private-provider-token", "WAAPI_INSTANCE_ID": "123", "WAAPI_WEBHOOK_SECRET": "private-secret-" * 4, "WHATSAPP_BUSINESS_NUMBER": "2348000000000"}):
             result = self.client.get("/v1/channels/whatsapp", headers=self.headers)

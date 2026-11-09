@@ -7,8 +7,8 @@ import os
 import re
 import secrets
 from datetime import datetime, timezone
-from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Request
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Request, Response
+from pydantic import BaseModel, Field, SecretStr
 import operations_store as state
 from shipment_costs import CustomsValue, TariffProfile, ShipmentStorage, customs_cost, storage_cost, today_lagos
 
@@ -96,39 +96,92 @@ def performance(authorization: str | None = Header(default=None), x_api_key: str
     return {"samples": len(values), "p50_ms": values[max(0, math.ceil(len(values) * .5) - 1)] if values else None, "p95_ms": values[max(0, math.ceil(len(values) * .95) - 1)] if values else None, "under_five_seconds": sum(value <= 5000 for value in values), "scope": "Recent workspace preparation timings. Each quote shows its measurement scope; queue time, final delivery, export, and human review are excluded. This is not an end-to-end speed guarantee."}
 
 
-@router.get("/v1/channels/whatsapp")
-def whatsapp_status(authorization: str | None = Header(default=None), x_api_key: str | None = Header(default=None)):
-    from whatsapp_intake import configured
+class WhatsAppSettings(BaseModel):
+    token: SecretStr | None = None
+    instance_id: str = Field(pattern=r"^[0-9]{1,30}$")
+    business_number: str = Field(pattern=r"^[0-9]{8,16}$")
+
+
+@router.put("/v1/channels/whatsapp/settings")
+def save_whatsapp_settings(body: WhatsAppSettings, request: Request, authorization: str | None = Header(default=None), x_api_key: str | None = Header(default=None)):
+    from whatsapp_settings import saved, register_webhook
+    import time
     _, company = _owner(authorization, x_api_key)
-    number = os.environ.get("WHATSAPP_BUSINESS_NUMBER", "")
-    # Report presence/format only; provider credentials never leave the server.
-    checks = {
-        "storage": False,
-        "provider_token": bool(os.environ.get("WAAPI_TOKEN")),
-        "instance_id": os.environ.get("WAAPI_INSTANCE_ID", "").isdigit(),
-        "webhook_secret": len(os.environ.get("WAAPI_WEBHOOK_SECRET", "")) >= 32,
-        "business_number": bool(re.fullmatch(r"\d{8,16}", number)),
-    }
+    lock = None
+    try:
+        state.require_intake_storage()
+        previous_lock = state.get("wa_setup_locks", company)
+        if previous_lock and previous_lock["payload"].get("until", 0) > time.time():
+            raise HTTPException(409, "Setup is already running. Wait a moment, then refresh.")
+        lock = state.put("wa_setup_locks", company, {"until": time.time() + 120}, company, expected=previous_lock["revision"] if previous_lock else 0)
+        if not lock: raise HTTPException(409, "Setup is already running. Please retry shortly.")
+        old = saved(company)
+        previous = old["payload"] if old else {}
+        token = body.token.get_secret_value().strip() if body.token else previous.get("token", "")
+        if not token or len(token) > 4096 or any(char.isspace() for char in token):
+            raise HTTPException(400, "Enter a valid WaAPI token without spaces.")
+        config = {"token": token, "instance_id": body.instance_id, "business_number": body.business_number,
+                  "webhook_secret": previous.get("webhook_secret") or secrets.token_urlsafe(32), "webhook_ready": False}
+        url = str(request.url_for("workspace_whatsapp_webhook", company=company, token=config["webhook_secret"]))
+        if not url.startswith("https://"):
+            raise HTTPException(400, "Open the public HTTPS version of this app to connect WhatsApp. WaAPI needs a reachable webhook address.")
+        row = state.put("wa_settings", company, config, company, expected=old["revision"] if old else 0)
+        if not row: raise HTTPException(409, "Settings changed. Refresh and retry.")
+        try:
+            register_webhook(config, url)
+        except ValueError as exc:
+            raise HTTPException(502, str(exc)) from None
+        if not state.put("wa_settings", company, {**config, "webhook_ready": True}, company, expected=row["revision"]):
+            raise HTTPException(409, "Settings changed. Retry setup to confirm the connection.")
+        return {"saved": True, "webhook_ready": True}
+    except HTTPException:
+        raise
+    except state.StorageSetupError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(503, "WhatsApp setup could not be completed. Please retry.") from exc
+    finally:
+        if lock:
+            state.put("wa_setup_locks", company, {"until": 0}, company, expected=lock["revision"])
+
+
+@router.get("/v1/channels/whatsapp")
+def whatsapp_status(response: Response, authorization: str | None = Header(default=None), x_api_key: str | None = Header(default=None)):
+    from whatsapp_intake import configured
+    from whatsapp_settings import settings, saved
+    _, company = _owner(authorization, x_api_key)
+    response.headers["Cache-Control"] = "no-store"
+    checks = {"storage": False}
     try:
         state.require_intake_storage()
         checks["storage"] = True
         links = [{"phone": row["key"].split("@")[0]} for row in state.listing("wa_links", company) if row["payload"].get("active")]
+        config = settings(company)
+        custom = saved(company)
+        ready = configured(company)
     except state.StorageSetupError as exc:
-        return {"configured": False, "links": [], "url": None, "setup_required": True, "detail": str(exc), "checks": checks}
+        return {"configured": False, "links": [], "url": None, "setup_required": True, "storage_ready": False, "detail": str(exc), "checks": checks}
     except Exception as exc:
         raise HTTPException(503, "WhatsApp connections could not be loaded. Please try again shortly.") from exc
-    ready = configured()
-    return {"configured": ready, "links": links, "url": f"https://wa.me/{number}" if checks["business_number"] else None, "setup_required": not ready, "detail": None if ready else "Finish the one-time provider and webhook setup below, then connect your number.", "checks": checks}
+    number = config["business_number"]
+    checks.update(provider_token=bool(config["token"]), instance_id=config["instance_id"].isdigit(), webhook_secret=len(config["webhook_secret"]) >= 32, business_number=bool(re.fullmatch(r"\d{8,16}", number)))
+    return {"configured": ready, "links": links, "url": f"https://wa.me/{number}" if checks["business_number"] else None,
+            "setup_required": not ready, "storage_ready": True, "settings_saved": bool(custom), "token_saved": bool(custom),
+            "instance_id": config["instance_id"] if custom else "", "business_number": number,
+            "webhook_ready": bool(custom and config.get("webhook_ready")), "checks": checks,
+            "detail": None if ready else "Enter your WhatsApp details below. We will configure the webhook automatically."}
 
 
 @router.post("/v1/channels/whatsapp/link")
 def new_whatsapp_code(authorization: str | None = Header(default=None), x_api_key: str | None = Header(default=None)):
     from whatsapp_intake import configured, link_code
     _, company = _owner(authorization, x_api_key)
-    if not configured(): raise HTTPException(503, "WhatsApp intake is not connected yet. Ask your administrator to finish setup.")
     try:
         state.require_intake_storage()
+        if not configured(company): raise HTTPException(503, "Save and connect your WhatsApp account first.")
         return link_code(company)
+    except HTTPException:
+        raise
     except state.StorageSetupError as exc:
         raise HTTPException(409, str(exc)) from exc
     except Exception as exc:
@@ -165,12 +218,28 @@ class _HideWebhookToken(logging.Filter):
 logging.getLogger("uvicorn.access").addFilter(_HideWebhookToken())
 
 
+@router.post("/whatsapp/webhook/{company}/{token}")
+async def workspace_whatsapp_webhook(company: str, token: str, request: Request, background_tasks: BackgroundTasks):
+    from whatsapp_settings import saved
+    try:
+        row = saved(company)
+    except Exception as exc:
+        raise HTTPException(503, "Intake storage is unavailable.") from exc
+    if not row or not secrets.compare_digest(token, row["payload"]["webhook_secret"]):
+        raise HTTPException(401, "Invalid webhook credentials.")
+    return await _receive_whatsapp(request, background_tasks, company)
+
+
 @router.post("/whatsapp/webhook/{token}")
 async def whatsapp_webhook(token: str, request: Request, background_tasks: BackgroundTasks):
-    from whatsapp_intake import enqueue, schedule_pending
     secret = os.environ.get("WAAPI_WEBHOOK_SECRET", "")
     if len(secret) < 32: raise HTTPException(503, "WhatsApp intake is not configured.")
     if not secrets.compare_digest(token, secret): raise HTTPException(401, "Invalid webhook credentials.")
+    return await _receive_whatsapp(request, background_tasks)
+
+
+async def _receive_whatsapp(request, background_tasks, company=None):
+    from whatsapp_intake import enqueue, schedule_pending
     raw = bytearray()
     async for chunk in request.stream():
         raw.extend(chunk)
@@ -178,7 +247,7 @@ async def whatsapp_webhook(token: str, request: Request, background_tasks: Backg
     try:
         payload = json.loads(raw)
         if not isinstance(payload, dict): raise ValueError
-        job = enqueue(payload)
+        job = enqueue(payload, company)
     except (ValueError, TypeError, AttributeError) as exc:
         raise HTTPException(400, "Invalid WhatsApp event.") from exc
     except Exception as exc:
