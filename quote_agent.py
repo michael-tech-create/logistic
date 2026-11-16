@@ -17,6 +17,7 @@ import sys
 from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
+from quote_charges import extract_charges, CONDITIONAL
 
 try:
     from dotenv import load_dotenv
@@ -41,7 +42,14 @@ Extract unstructured logistics data and return JSON matching the schema.
 Rules:
 - Standardize dates to YYYY-MM-DD.
 - Standardize currencies to 3-letter ISO codes (USD, EUR, GBP, NGN).
-- Convert transit times to total estimated days as an integer.
+- Include only explicitly quoted unconditional charges in the baseline. Keep optional,
+  conditional, unquoted and unquantified rates in notes; never price them as flat fees.
+- Count a repeated quotation of the same charge once; flag ambiguous duplicates.
+- Apply explicit minimum quantities (45/day, minimum 3 days = 135).
+- AMS/ISF at 35 each means two filings totaling 70. Do not guess other quantities.
+- Require source evidence for every amount, route, and transit field. Do not infer
+  ocean transit from rental, waiting, free-time, validity or payment periods.
+- Convert explicitly labeled transit times to total estimated days as an integer.
   Use the midpoint of a range when needed (3-5 weeks -> 28).
 - Categorize every line item as one of:
   Base Freight, Fuel / Surcharge, Origin Charge, Destination Charge,
@@ -114,6 +122,7 @@ class LineItem(BaseModel):
     unit: Optional[str] = None
     category: Category
     currency: Optional[str] = None
+    source_text: Optional[str] = None
 
 
 class Financials(BaseModel):
@@ -192,17 +201,12 @@ def _money(raw: str) -> tuple[Optional[float], Optional[str]]:
 
 
 def _transit_days(text: str) -> Optional[int]:
-    weeks = re.search(r"(\d+)\s*-\s*(\d+)\s*weeks?", text, re.I)
-    if weeks:
-        mid = (int(weeks.group(1)) + int(weeks.group(2))) / 2
-        return int(round(mid * 7))
-    one_week = re.search(r"(\d+)\s*weeks?", text, re.I)
-    if one_week:
-        return int(one_week.group(1)) * 7
-    days = re.search(r"~?\s*(\d+)\s*days?", text, re.I)
-    if days:
-        return int(days.group(1))
-    return None
+    # Rental minimums, payment terms, validity and free time are not transit.
+    match = re.search(r"\b(?:transit(?: time)?|transit duration|sailing time|ocean transit)\s*[:=~]?\s*(\d+)(?:\s*[-–]\s*(\d+))?\s*(days?|weeks?)\b", text, re.I)
+    if not match:
+        return None
+    value = (int(match[1]) + int(match[2] or match[1])) / 2
+    return int(round(value * (7 if match[3].lower().startswith("week") else 1)))
 
 
 def _mode(text: str) -> TransportMode:
@@ -264,9 +268,14 @@ def _invoice_lines(text: str) -> list[tuple[str, str, float]]:
 
 def _spoken_route(text: str) -> tuple[str | None, str | None]:
     """Pull 'from Lagos to Onne' out of a voice transcript."""
-    place = r"[A-Za-z][A-Za-z.'-]*(?:\s+[A-Za-z][A-Za-z.'-]*){0,3}"
+    place = r"[A-Za-z][A-Za-z /()'-]{1,65}?"
     skip = {"the", "a", "an", "this", "that", "quote", "naira", "dollar", "dollars", "usd", "ngn"}
-    match = re.search(rf"\bfrom\s+({place})\s+to\s+({place})\b", text, re.I)
+    match = re.search(rf"\bfrom\s+({place})\s+to\s+({place})(?=[,.;\n]|$)", text, re.I)
+    if not match:
+        # Explicit lane shorthand, without treating arbitrary prose as a place.
+        port = r"(?:Shanghai|Ningbo|LAX|Los Angeles|Long Beach|Hamburg|Lagos|Apapa|Houston)"
+        alternatives = rf"{port}(?:\s*(?:/|or|\(or)\s*{port}\)?)?"
+        match = re.search(rf"\b({alternatives})\s*(?:to|->|→)\s*({alternatives})(?=[,.;\n]|$)", text, re.I)
     if not match:
         return None, None
 
@@ -339,6 +348,9 @@ def parse_freight_quote(raw_quote_text: str) -> QuoteExtractionResult:
         origin = Location(location_name="Apapa", port_code=None, country="Nigeria")
     if destination.location_name is None and re.search(r"\bikeja\b", text, re.I):
         destination = Location(location_name="Ikeja", port_code=None, country="Nigeria")
+    for label, place in (("Origin", origin), ("Destination", destination)):
+        if place.location_name and re.search(r"\bor\b|/", place.location_name, re.I):
+            flags.append(f"{label} alternatives require confirmation: {place.location_name}.")
     if origin.country is None and origin.location_name:
         flags.append("Origin country was not stated and could not be inferred from a known port code.")
     elif origin.country and origin.port_code:
@@ -370,86 +382,31 @@ def parse_freight_quote(raw_quote_text: str) -> QuoteExtractionResult:
 
     line_items: list[LineItem] = []
     currency: Optional[str] = None
-    charge_block = re.search(r"Charges:\s*(.*?)(?:Total Amount|Terms:|\Z)", text, re.S | re.I)
-    if charge_block:
-        for line in charge_block.group(1).splitlines():
-            line = line.strip().lstrip("-").strip()
-            if not line or ":" not in line:
-                continue
-            desc, money_raw = line.split(":", 1)
-            if re.search(r"\b(subtotal|grand total|total local|total amount due)\b", desc, re.I):
-                flags.append(f"Skipped rollup '{desc.strip()}' so it is not added on top of the detail lines.")
-                continue
-            amount, code = _money(money_raw)
-            if amount is None:
-                flags.append(f"Could not parse amount for '{desc.strip()}'.")
-                continue
-            if code and currency and code != currency:
-                flags.append(f"Kept {desc.strip()} as {code} {amount:,.2f} beside the {currency} lines.")
-            currency = "NGN" if code == "NGN" else (currency or code)
-            category = _categorize(desc)
-            if _optional_accessorial(desc):
-                flags.append(f"Left optional charge '{desc.strip()}' out of the all-in total.")
-                continue
-            if "customs" in desc.lower() and category == "Origin Charge":
-                flags.append(
-                    f"{desc.strip()} categorized as Origin Charge (export clearance); "
-                    "it could also be read as a customs brokerage fee."
-                )
-            line_items.append(
-                LineItem(description=desc.strip(), amount=amount, unit=None, category=category, currency=code)
-            )
-            if "per " not in money_raw.lower():
-                pass
-    if not line_items:
-        money_pattern = re.compile(
-            r"(?:₦|NGN|USD|US\$|\$)\s*([\d,]+(?:\.\d{1,2})?)"
-            r"|([\d,]{4,}(?:\.\d{1,2})?)\s*(USD|NGN|₦|\$|naira|dollars?)\b",
-            re.I,
-        )
-        for line in text.splitlines():
-            cleaned = line.strip().lstrip("-•").strip()
-            previous = 0
-            for money in money_pattern.finditer(cleaned):
-                if money.group(1):
-                    amount = float(money.group(1).replace(",", ""))
-                    code = "USD" if re.search(r"USD|\$", money.group(0), re.I) else "NGN"
-                else:
-                    amount = float(money.group(2).replace(",", ""))
-                    code = "USD" if re.search(r"USD|\$|dollar", money.group(3), re.I) else "NGN"
-                desc = cleaned[previous:money.start()].strip(" :-")
-                previous = money.end()
-                if _optional_accessorial(desc):
-                    flags.append(f"Left optional charge '{desc}' out of the all-in total.")
-                    continue
-                if len(desc) < 3 or re.search(
-                    r"\b(subtotal|grand total|total local|total amount due|customs/tax|official/mid|parallel|platform fee|duty finance)\b",
-                    desc,
-                    re.I,
-                ):
-                    flags.append(f"Skipped rollup '{desc}' so it is not added on top of the detail lines.")
-                    continue
-                if currency and code != currency:
-                    flags.append(f"Kept {desc} as {code} {amount:,.2f} beside the {currency} lines.")
-                currency = "NGN" if code == "NGN" else (currency or code)
-                line_items.append(LineItem(description=desc, amount=amount, unit=None, category=_categorize(desc), currency=code))
-        if line_items:
-            flags.append("Read prices from lines that included NGN or USD amounts.")
+    candidates, charge_flags = extract_charges(text)
+    flags.extend(charge_flags)
+    for candidate in candidates:
+        line_items.append(LineItem(**candidate, category=_categorize(candidate["description"])))
+        code = candidate["currency"]
+        currency = "NGN" if code == "NGN" else (currency or code)
     if not line_items:
         for description, unit, total in _invoice_lines(text):
+            if CONDITIONAL.search(description):
+                flags.append(f"Left optional charge out of baseline: {description}")
+                continue
             line_items.append(LineItem(description=description, amount=total, unit=unit, category=_categorize(description)))
             currency = currency or "USD"
         if line_items:
             flags.append("Read as a service invoice. Line amount is the row total, not the unit price.")
             flags.append("No origin port was stated.")
     if line_items and all(item.unit is None for item in line_items):
-        flags.append("Line items are quoted per shipment with no explicit rate unit.")
+        flags.append("No explicit rate units were provided for the included amounts.")
 
     total_match = re.search(r"Total Amount Due:?\s*(.+)", text, re.I)
     stated_total = None
     if total_match:
         stated_total, total_code = _money(total_match.group(1))
         currency = total_code or currency
+    original_stated_total = stated_total
     for item in line_items:
         item.currency = item.currency or currency or "USD"
     item_sum = round(sum(item.amount for item in line_items if item.currency == (currency or "USD")), 2)
@@ -463,9 +420,9 @@ def parse_freight_quote(raw_quote_text: str) -> QuoteExtractionResult:
                 f"Printed total {stated_total:,.2f} includes subtotals. Working total is the detail-line sum {item_sum:,.2f}."
             )
             stated_total = item_sum
-        elif any(flag.startswith("Left optional charge") for flag in flags):
+        elif any("not added to baseline" in flag or flag.startswith(("Left optional charge", "Possible repeated charge", "Minimum charge")) for flag in flags):
             flags.append(
-                f"Printed total {stated_total:,.2f} includes an optional charge. Working total is the confirmed sum {item_sum:,.2f}."
+                f"Printed total {stated_total:,.2f} differs from the supported baseline after exclusions. Working total is the detail sum {item_sum:,.2f}."
             )
             stated_total = item_sum
         else:
@@ -479,7 +436,7 @@ def parse_freight_quote(raw_quote_text: str) -> QuoteExtractionResult:
         flags.append(
             "Local waiting window: loading {loading_hours:g}h, offloading {offloading_hours:g}h, warehouse {warehouse_days:g}d".format(**windows)
         )
-    else:
+    elif original_stated_total is not None and abs(item_sum - original_stated_total) < 0.009:
         flags.append(
             f"Line-item sum {item_sum:.2f} matches the stated total of {currency or ''} {stated_total:.2f}.".strip()
         )
@@ -503,6 +460,8 @@ def parse_freight_quote(raw_quote_text: str) -> QuoteExtractionResult:
     if notes is None and service:
         notes = service.group(1).strip()
 
+    if charge_flags:
+        notes = "\n".join(filter(None, [notes, *charge_flags]))
     if not destination.location_name:
         flags.append("Destination is missing.")
     if not line_items:
@@ -577,11 +536,11 @@ def _annotate_place(place: Location) -> None:
     )
     if any(word in low for word in inland):
         place.country = "Nigeria"
-    elif any(word in low for word in ("houston", "united states", "usa", "u.s.")):
+    elif any(word in low for word in ("houston", "united states", "usa", "u.s.", "los angeles", "long beach", "lax")):
         place.country = "United States"
     elif any(word in low for word in ("thailand", "bangkok")):
         place.country = "Thailand"
-    elif "china" in low or "shanghai" in low:
+    elif "china" in low or "shanghai" in low or "ningbo" in low:
         place.country = "China"
     elif "germany" in low or "hamburg" in low:
         place.country = "Germany"
@@ -813,6 +772,19 @@ def parse_freight_quote_llm(raw_quote_text: str) -> QuoteExtractionResult:
         try:
             raw = _gemini_once(keys[slot], raw_quote_text, model)
             quote = _clean_model_quote(QuoteExtractionResult.model_validate(_coerce_quote_payload(json.loads(raw))))
+            evidence = parse_freight_quote(raw_quote_text)
+            for field in ("origin", "destination"):
+                supported = getattr(evidence.shipment_details, field)
+                proposed = getattr(quote.shipment_details, field)
+                if supported.location_name:
+                    setattr(quote.shipment_details, field, supported)
+                elif proposed.location_name and proposed.location_name.casefold() not in raw_quote_text.casefold():
+                    setattr(quote.shipment_details, field, Location())
+                    quote.extraction_flags.append(f"Unsupported model {field} removed; confirm the route.")
+            quote.financials = evidence.financials
+            quote.shipment_details.est_transit_days = evidence.shipment_details.est_transit_days
+            quote.extraction_flags.extend(evidence.extraction_flags)
+            quote.extraction_flags.append("Model financials replaced with source-supported charges; unresolved terms require review.")
             quote.extraction_flags.append(f"Read by Gemini {model}, key {slot + 1} of {len(keys)}.")
             return quote
         except Exception as exc:  # noqa: BLE001 — the next key is only for quota or a dead key

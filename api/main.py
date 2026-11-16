@@ -58,7 +58,10 @@ from customs import to_customs_record
 from market import enrich, load_fx_settings, save_fx_settings
 from quote_agent import parse_freight_quote, parse_quote_smart
 
+from bounty_bridge import router as bounty_router
+
 app = FastAPI(title="Global customs quote API", version="1.0.0")
+app.include_router(bounty_router)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -356,6 +359,8 @@ def _save_desk_quote(record: dict, user: dict, *, source_text: str | None = None
     save_record(record["record_id"], record)
     if record.get("sync_error"):
         raise HTTPException(503, "The quote could not be synced. Please try again when storage is available.")
+    from bounty_bridge import enqueue
+    enqueue(record)
     return record
 
 
@@ -459,29 +464,19 @@ def auth_reset_password(body: ResetPasswordBody):
     return {"message": "Your password has been reset. Sign in with your new password."}
 
 
-_extract_cache: dict[str, dict] = {}
-
-
 class ExtractBody(BaseModel):
-    text: str
-    idempotency_key: str | None = None
+    text: str = Field(min_length=1, max_length=100000)
+    idempotency_key: str = Field(min_length=1, max_length=128)
 
 
 @app.post("/api/v1/extract")
 def extract_for_bounty(body: ExtractBody, x_api_key: str | None = Header(default=None)):
     """Internal extract for the bounty agent. Does not use a customer API key or quota."""
-    expected = os.environ.get("QUOTE_INTERNAL_TOKEN", "")
-    if not expected or x_api_key != expected:
-        raise HTTPException(401, "internal token required")
+    from bounty_bridge import authorize, extract
+    authorize(x_api_key)
     if not body.text.strip():
         raise HTTPException(400, "Quote text is empty.")
-    key = (body.idempotency_key or "").strip()
-    if key and key in _extract_cache:
-        return _extract_cache[key]
-    payload = parse_freight_quote(body.text).model_dump()
-    if key:
-        _extract_cache[key] = payload
-    return payload
+    return extract(body.text, body.idempotency_key, parse_freight_quote)
 
 
 @app.post("/v1/quotes/parse")
@@ -664,12 +659,7 @@ def _alert_telegram(text: str, chat_id: str | None) -> None:
             headers={"Content-Type": "application/json"},
         )
         urllib.request.urlopen(request, timeout=20).read()
-    try:
-        from notify_bounty import notify_bounty
 
-        notify_bounty("quote_ready")
-    except Exception:
-        pass
 
 
 class ReviewBody(BaseModel):
